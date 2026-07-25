@@ -76,6 +76,15 @@ public:
 
     double solve_price() const;
     bool commit(std::string_view finished_at);
+
+    long long cache_creation_tokens() const
+    {
+        return static_cast<long long>(cache_creation_5m_tokens) + cache_creation_1h_tokens;
+    }
+    long long total_tokens() const
+    {
+        return static_cast<long long>(input_tokens) + output_tokens + cache_read_tokens + cache_creation_tokens();
+    }
 };
 
 struct PricingBreakdown {
