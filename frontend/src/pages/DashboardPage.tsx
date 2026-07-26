@@ -3,7 +3,6 @@ import { Link } from 'react-router-dom';
 
 import { getDashboard, type DashboardData } from '../api/dashboard';
 import { getUsageTimeSeries, type UsageTimeSeriesPoint } from '../api/usage';
-import { SegmentedFrame } from '../components/SegmentedFrame';
 import { formatIntComma } from '../format/int';
 import { fillDailyBuckets } from '../utils/timeSeries';
 import { UsageTimeSeriesCard } from './usage/UsageTimeSeriesCard';
@@ -129,99 +128,49 @@ export function DashboardPage() {
         </div>
       ) : null}
 
-      <SegmentedFrame>
-        <div className="row g-4">
-          <div className="col-12">
-            <div className="row g-4">
-              <div className="col-md-6 col-xl-3">
-                <div className="card h-100 mb-0">
-                  <div className="card-body">
-                    <div className="d-flex align-items-center mb-3">
-                      <div className="bg-primary bg-opacity-10 text-primary rounded-pill p-2 me-3">
-                        <span className="fs-4 px-1 material-symbols-rounded">attach_money</span>
-                      </div>
-                      <h6 className="card-title mb-0 fw-bold">今日费用</h6>
-                    </div>
-                    <div className="mb-0">
-                      <h3 className="fw-bold mb-1">{todayUsageUSD}</h3>
-                      <p className="text-muted small mb-0">预估消耗 (USD)</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
+      <div className="rlm-page-head">
+        <h1>控制台</h1>
+        <p className="rlm-page-sub">今日用量概况，随每次请求实时更新。</p>
+      </div>
 
-              <div className="col-md-6 col-xl-3">
-                <div className="card h-100 mb-0">
-                  <div className="card-body">
-                    <div className="d-flex align-items-center mb-3">
-                      <div className="bg-info bg-opacity-10 text-info rounded-pill p-2 me-3">
-                        <span className="fs-4 px-1 material-symbols-rounded">chat</span>
-                      </div>
-                      <h6 className="card-title mb-0 fw-bold">今日请求</h6>
-                    </div>
-                    <div className="mb-0">
-                      <h3 className="fw-bold mb-1">{todayRequests}</h3>
-                      <div className="text-muted small">
-                        <span className="badge bg-light text-secondary border fw-normal">RPM: {todayRPM}</span>
-                        <span className="ms-1">次/分钟</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="col-md-6 col-xl-3">
-                <div className="card h-100 mb-0">
-                  <div className="card-body">
-                    <div className="d-flex align-items-center mb-3">
-                      <div className="bg-success bg-opacity-10 text-success rounded-pill p-2 me-3">
-                        <span className="fs-4 px-1 material-symbols-rounded">memory</span>
-                      </div>
-                      <h6 className="card-title mb-0 fw-bold">今日 Token</h6>
-                    </div>
-                    <div className="mb-0">
-                      <h3 className="fw-bold mb-1">{todayTokens}</h3>
-                      <div className="text-muted small">
-                        <span className="badge bg-light text-secondary border fw-normal">TPM: {todayTPM}</span>
-                        <span className="ms-1">Tokens/分钟</span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="col-md-6 col-xl-3">
-                <div className="card h-100 border-dashed mb-0">
-                  <div className="card-body d-flex flex-column align-items-center justify-content-center text-center py-4">
-                    <div className="bg-light text-muted rounded-circle p-2 mb-2">
-                      <span className="fs-4 material-symbols-rounded">account_balance_wallet</span>
-                    </div>
-                    <h6 className="fw-bold small mb-1">按量计费</h6>
-                    <p className="text-muted small mb-2">模型调用直接从余额扣费。</p>
-                    <Link to="/topup" className="btn btn-outline-primary btn-sm px-3 py-1 smaller">
-                      余额充值
-                    </Link>
-                  </div>
-                </div>
-              </div>
-            </div>
+      <div className="rlm-stats mb-3">
+        <div className="rlm-stat rlm-stat-green">
+          <div className="rlm-stat-label">今日费用</div>
+          <div className="rlm-stat-value">{todayUsageUSD}</div>
+          <div className="rlm-stat-delta">预估消耗 (USD)</div>
+        </div>
+        <div className="rlm-stat rlm-stat-blue">
+          <div className="rlm-stat-label">今日请求</div>
+          <div className="rlm-stat-value">{todayRequests}</div>
+          <div className="rlm-stat-delta">RPM {todayRPM} 次/分钟</div>
+        </div>
+        <div className="rlm-stat rlm-stat-clay">
+          <div className="rlm-stat-label">今日 Token</div>
+          <div className="rlm-stat-value">{todayTokens}</div>
+          <div className="rlm-stat-delta">TPM {todayTPM} Tokens/分钟</div>
+        </div>
+        <div className="rlm-stat rlm-stat-violet">
+          <div className="rlm-stat-label">计费方式</div>
+          <div className="rlm-stat-value">按量计费</div>
+          <div className="rlm-stat-delta">
+            模型调用从余额扣费 · <Link to="/topup">余额充值 →</Link>
           </div>
         </div>
+      </div>
 
-        <UsageTimeSeriesCard
-          rangeSinceText={detailSeriesStart || '-'}
-          rangeUntilText={detailSeriesEnd || '-'}
-          detailSeries={detailSeries}
-          detailSeriesErr={detailSeriesErr}
-          detailSeriesLoading={detailSeriesLoading}
-          detailField={detailField}
-          setDetailField={setDetailField}
-          detailGranularity={detailGranularity}
-          setDetailGranularity={setDetailGranularity}
-          fieldOptions={fieldOptions}
-          granularityOptions={granularityOptions}
-        />
-      </SegmentedFrame>
+      <UsageTimeSeriesCard
+        rangeSinceText={detailSeriesStart || '-'}
+        rangeUntilText={detailSeriesEnd || '-'}
+        detailSeries={detailSeries}
+        detailSeriesErr={detailSeriesErr}
+        detailSeriesLoading={detailSeriesLoading}
+        detailField={detailField}
+        setDetailField={setDetailField}
+        detailGranularity={detailGranularity}
+        setDetailGranularity={setDetailGranularity}
+        fieldOptions={fieldOptions}
+        granularityOptions={granularityOptions}
+      />
     </div>
   );
 }

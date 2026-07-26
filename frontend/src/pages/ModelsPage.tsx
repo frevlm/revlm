@@ -1,72 +1,36 @@
 import { useEffect, useMemo, useState } from 'react';
 
 import { listUserModelsDetail, type UserManagedModel } from '../api/models';
-import { SegmentedFrame } from '../components/SegmentedFrame';
 import { formatUSDPlain } from '../format/money';
 import { providerCachePriceRows } from '../modelPricingDisplay';
+
+function priceCell(value: string) {
+  const n = parseFloat(value);
+  if (!Number.isFinite(n) || n <= 0) {
+    return <span className="rlm-price-empty">—</span>;
+  }
+  return (
+    <span className="rlm-price">
+      <span className="rlm-price-cur">$</span>
+      {formatUSDPlain(value)}
+    </span>
+  );
+}
 
 export function ModelsPage() {
   const [models, setModels] = useState<UserManagedModel[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState('');
-  const [activeGroup, setActiveGroup] = useState<string>('default');
+  const [activeOwner, setActiveOwner] = useState('');
 
-  const groupedModels = useMemo(() => {
+  const ownerGroups = useMemo(() => {
     const buckets = new Map<string, UserManagedModel[]>();
     for (const model of models) {
       const ownedBy = (model.owned_by || '').trim() || 'unknown';
-      const normalized: UserManagedModel = {
-        ...model,
-        group_name: (model.group_name || '').trim(),
-        owned_by: ownedBy,
-      };
       if (!buckets.has(ownedBy)) {
         buckets.set(ownedBy, []);
       }
-      buckets.get(ownedBy)!.push(normalized);
-    }
-
-    return Array.from(buckets.entries())
-      .map(([ownedBy, groupItems]) => {
-        const sortedModels = groupItems.slice().sort((a, b) => {
-          return a.public_id.localeCompare(b.public_id, 'en-US');
-        });
-        return {
-          groupName: ownedBy,
-          displayName: ownedBy,
-          models: sortedModels,
-        };
-      })
-      .sort((a, b) => {
-        if (a.groupName === 'unknown' && b.groupName !== 'unknown') return 1;
-        if (b.groupName === 'unknown' && a.groupName !== 'unknown') return -1;
-        return a.groupName.localeCompare(b.groupName, 'zh-CN');
-      });
-  }, [models]);
-
-  useEffect(() => {
-    if (groupedModels.length === 0) return;
-    if (groupedModels.some((g) => g.groupName === activeGroup)) return;
-    setActiveGroup(groupedModels[0].groupName);
-  }, [groupedModels, activeGroup]);
-
-  const currentGroup = useMemo(() => {
-    if (groupedModels.length === 0) return null;
-    return groupedModels.find((g) => g.groupName === activeGroup) || groupedModels[0];
-  }, [groupedModels, activeGroup]);
-
-  const currentGroupByOwner = useMemo(() => {
-    if (!currentGroup) return [];
-    const buckets = new Map<string, UserManagedModel[]>();
-    for (const model of currentGroup.models) {
-      const ownedBy = (model.owned_by || '').trim() || 'unknown';
-      if (!buckets.has(ownedBy)) {
-        buckets.set(ownedBy, []);
-      }
-      buckets.get(ownedBy)!.push({
-        ...model,
-        owned_by: ownedBy,
-      });
+      buckets.get(ownedBy)!.push({ ...model, owned_by: ownedBy });
     }
 
     return Array.from(buckets.entries())
@@ -79,7 +43,30 @@ export function ModelsPage() {
         if (b.ownedBy === 'unknown' && a.ownedBy !== 'unknown') return -1;
         return a.ownedBy.localeCompare(b.ownedBy, 'en-US');
       });
-  }, [currentGroup]);
+  }, [models]);
+
+  useEffect(() => {
+    if (ownerGroups.length === 0) return;
+    if (ownerGroups.some((g) => g.ownedBy === activeOwner)) return;
+    setActiveOwner(ownerGroups[0].ownedBy);
+  }, [ownerGroups, activeOwner]);
+
+  const currentModels = useMemo(() => {
+    return ownerGroups.find((g) => g.ownedBy === activeOwner)?.models || [];
+  }, [ownerGroups, activeOwner]);
+
+  // 缓存价格列因归属方而异（anthropic 3 列 / openai 1 列），按当前视图动态取并集。
+  const cacheColumns = useMemo(() => {
+    const seen = new Map<string, string>();
+    for (const m of currentModels) {
+      for (const row of providerCachePriceRows(m.owned_by, m)) {
+        if (!seen.has(row.key)) {
+          seen.set(row.key, row.label);
+        }
+      }
+    }
+    return Array.from(seen.entries()).map(([key, label]) => ({ key, label }));
+  }, [currentModels]);
 
   useEffect(() => {
     (async () => {
@@ -101,167 +88,104 @@ export function ModelsPage() {
 
   return (
     <div className="fade-in-up">
-      <SegmentedFrame>
-        <div className="card overflow-hidden rlm-models-card mb-0">
-          <div className="card-body p-0">
-            {err ? (
-              <div className="alert alert-danger m-3" role="alert">
-                <span className="me-2 material-symbols-rounded">report</span> {err}
-              </div>
-            ) : null}
+      <div className="rlm-page-head">
+        <h1>模型</h1>
+        <p className="rlm-page-sub">可用模型与计价，单位 USD / 每百万 Tokens。</p>
+      </div>
 
-            {loading ? (
-              <div className="text-center py-5 text-muted">加载中…</div>
-            ) : models.length === 0 ? (
-              <div className="text-center py-5 text-muted">
-                <span className="fs-1 d-block mb-3 material-symbols-rounded">inbox</span>
-                暂无可用模型，请联系管理员配置模型目录。
-              </div>
-            ) : (
-              <div className="rlm-models-layout">
-                <aside className="rlm-models-groups">
-                  <div className="rlm-models-groups-head">
-                    <span className="material-symbols-rounded">dataset</span> 归属方
-                  </div>
-                  <div className="rlm-models-group-list">
-                    {groupedModels.map((group) => (
-                      <button
-                        key={group.groupName}
-                        type="button"
-                        className={`rlm-models-group-item ${activeGroup === group.groupName ? 'active' : ''}`}
-                        onClick={() => setActiveGroup(group.groupName)}
-                      >
-                        <span className="rlm-models-group-name font-monospace">{group.displayName}</span>
-                        <span className="rlm-models-group-count">{group.models.length}</span>
-                      </button>
-                    ))}
-                  </div>
-                </aside>
-                <section className="rlm-models-main d-flex flex-column">
-                  <div
-                    className="d-flex align-items-center justify-content-between p-3 border-bottom bg-white sticky-top"
-                    style={{ zIndex: 10 }}
-                  >
-                    <h5 className="mb-0 fs-6 fw-bold text-secondary">
-                      <span className="me-2 material-symbols-rounded align-middle">smart_toy</span>可用模型列表
-                    </h5>
-                    <span className="badge bg-secondary bg-opacity-10 text-secondary border">
-                      共 {currentGroup?.models.length || 0} 个模型
-                    </span>
-                  </div>
-
-                  <div className="p-3 bg-light bg-opacity-25 flex-fill overflow-auto">
-                    {(currentGroup?.models || []).length === 0 ? (
-                      <div className="text-center py-5 text-muted">
-                        <span className="fs-1 d-block mb-3 material-symbols-rounded">folder_off</span>
-                        当前归属方视图暂无可用模型。
-                      </div>
-                    ) : (
-                      <div className="d-flex flex-column gap-2">
-                        {currentGroupByOwner.map((ownerGroup) => (
-                          <div
-                            key={`${currentGroup?.groupName}:${ownerGroup.ownedBy}`}
-                            className="d-flex flex-column gap-2"
-                          >
-                            {ownerGroup.models.map((m) => {
-                              const cachePriceRows = providerCachePriceRows(m.owned_by, m).filter(
-                                (row) => parseFloat(row.value) > 0
-                              );
-                              return (
-                                <div
-                                  key={m.public_id}
-                                  className="bg-white rounded border p-3 transition-all hover-shadow d-flex flex-wrap align-items-center justify-content-between gap-3"
-                                >
-                                  {/* Left: Identity */}
-                                  <div className="d-flex align-items-center gap-3" style={{ minWidth: '200px' }}>
-                                    {m.icon_url ? (
-                                      <img
-                                        className="rlm-model-icon rounded-3"
-                                        src={m.icon_url}
-                                        alt={m.owned_by || 'revlm'}
-                                        title={m.owned_by || 'revlm'}
-                                        loading="lazy"
-                                        style={{ width: '32px', height: '32px' }}
-                                        onError={(e) => {
-                                          (e.currentTarget as HTMLImageElement).style.display = 'none';
-                                        }}
-                                      />
-                                    ) : (
-                                      <div
-                                        className="d-flex align-items-center justify-content-center bg-secondary bg-opacity-10 rounded-3 text-secondary"
-                                        style={{ width: '32px', height: '32px' }}
-                                      >
-                                        <span className="material-symbols-rounded" style={{ fontSize: '20px' }}>
-                                          smart_toy
-                                        </span>
-                                      </div>
-                                    )}
-                                    <div className="d-flex flex-column">
-                                      <span className="font-monospace fw-bold text-dark fs-6 text-break">
-                                        {m.public_id}
-                                      </span>
-                                      <span className="text-muted smaller" style={{ fontSize: '0.75rem' }}>
-                                        {m.owned_by || 'Unknown'}
-                                      </span>
-                                    </div>
-                                  </div>
-
-                                  {/* Middle: Pricing */}
-                                  <div className="d-flex flex-wrap align-items-center gap-3 text-secondary small flex-grow-1 justify-content-end justify-content-lg-center">
-                                    {/* Normal Pricing */}
-                                    <div className="d-flex align-items-center gap-3 px-2 py-1 bg-light rounded-pill border">
-                                      <div className="d-flex align-items-baseline gap-1">
-                                        <span className="text-muted smaller">In</span>
-                                        <span className="font-monospace fw-bold text-dark">
-                                          ${formatUSDPlain(m.input_usd_per_1m)}
-                                        </span>
-                                      </div>
-                                      <div className="vr opacity-25"></div>
-                                      <div className="d-flex align-items-baseline gap-1">
-                                        <span className="text-muted smaller">Out</span>
-                                        <span className="font-monospace fw-bold text-dark">
-                                          ${formatUSDPlain(m.output_usd_per_1m)}
-                                        </span>
-                                      </div>
-                                    </div>
-
-                                    {cachePriceRows.length > 0 && (
-                                      <div className="d-flex align-items-center gap-3 px-2 py-1 bg-warning bg-opacity-10 rounded-pill border border-warning-subtle">
-                                        {cachePriceRows.map((row, index) => (
-                                          <div className="d-flex align-items-center gap-3" key={row.key}>
-                                            {index > 0 ? <div className="vr opacity-25"></div> : null}
-                                            <div className="d-flex align-items-baseline gap-1">
-                                              <span className="text-warning-emphasis smaller">{row.shortLabel}</span>
-                                              <span className="font-monospace fw-bold text-dark">
-                                                ${formatUSDPlain(row.value)}
-                                              </span>
-                                            </div>
-                                          </div>
-                                        ))}
-                                      </div>
-                                    )}
-                                  </div>
-
-                                  {/* Right: Status */}
-                                  <div className="d-none d-md-block ps-2">
-                                    <span className="badge bg-success bg-opacity-10 text-success border border-success-subtle rounded-pill px-3 py-2 fw-normal">
-                                      可用
-                                    </span>
-                                  </div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </section>
-              </div>
-            )}
-          </div>
+      {err ? (
+        <div className="alert alert-danger" role="alert">
+          <span className="me-2 material-symbols-rounded">report</span> {err}
         </div>
-      </SegmentedFrame>
+      ) : null}
+
+      <div className="card mb-0 overflow-hidden">
+        <div className="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+          <div className="rlm-owner-pills">
+            {ownerGroups.map((group) => (
+              <button
+                key={group.ownedBy}
+                type="button"
+                className={`rlm-owner-pill ${activeOwner === group.ownedBy ? 'active' : ''}`}
+                onClick={() => setActiveOwner(group.ownedBy)}
+              >
+                {group.ownedBy}
+                <span className="rlm-owner-pill-count">{group.models.length}</span>
+              </button>
+            ))}
+          </div>
+          <span className="text-muted smaller fw-normal">共 {currentModels.length} 个模型</span>
+        </div>
+
+        {loading ? (
+          <div className="text-center py-5 text-muted">加载中…</div>
+        ) : models.length === 0 ? (
+          <div className="text-center py-5 text-muted">
+            <span className="fs-1 d-block mb-3 material-symbols-rounded">inbox</span>
+            暂无可用模型，请联系管理员配置模型目录。
+          </div>
+        ) : currentModels.length === 0 ? (
+          <div className="text-center py-5 text-muted">
+            <span className="fs-1 d-block mb-3 material-symbols-rounded">folder_off</span>
+            当前归属方视图暂无可用模型。
+          </div>
+        ) : (
+          <table className="table rlm-models-table mb-0">
+            <thead>
+              <tr>
+                <th>模型</th>
+                <th className="text-end">输入</th>
+                <th className="text-end">输出</th>
+                {cacheColumns.map((col) => (
+                  <th key={col.key} className="text-end">
+                    {col.label}
+                  </th>
+                ))}
+                <th className="text-end">状态</th>
+              </tr>
+            </thead>
+            <tbody>
+              {currentModels.map((m) => {
+                const cacheValues = new Map(providerCachePriceRows(m.owned_by, m).map((row) => [row.key, row.value]));
+                return (
+                  <tr key={m.public_id}>
+                    <td>
+                      <div className="d-flex align-items-center gap-2">
+                        {m.icon_url ? (
+                          <img
+                            className="rlm-model-icon"
+                            src={m.icon_url}
+                            alt={m.owned_by}
+                            title={m.owned_by}
+                            loading="lazy"
+                            onError={(e) => {
+                              (e.currentTarget as HTMLImageElement).style.display = 'none';
+                            }}
+                          />
+                        ) : null}
+                        <div>
+                          <div className="rlm-model-name">{m.public_id}</div>
+                          <div className="rlm-model-owner">{m.owned_by}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="text-end">{priceCell(m.input_usd_per_1m)}</td>
+                    <td className="text-end">{priceCell(m.output_usd_per_1m)}</td>
+                    {cacheColumns.map((col) => (
+                      <td key={col.key} className="text-end">
+                        {priceCell(cacheValues.get(col.key) || '')}
+                      </td>
+                    ))}
+                    <td className="text-end">
+                      <span className="rlm-dot-state">可用</span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }

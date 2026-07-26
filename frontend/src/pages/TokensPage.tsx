@@ -15,8 +15,6 @@ import {
 } from '../api/tokens';
 import { getUsageWindows, type UsageWindow } from '../api/usage';
 import { BootstrapModal } from '../components/BootstrapModal';
-import { DividedStack } from '../components/DividedStack';
-import { SegmentedFrame } from '../components/SegmentedFrame';
 import { closeModalById } from '../components/modal';
 import { formatUSDPlain } from '../format/money';
 import { cacheHitRate, formatLocalDate, formatLocalDateTimeMinute } from './usage/usageUtils';
@@ -279,271 +277,226 @@ export function TokensPage() {
 
   return (
     <div className="fade-in-up">
-      <SegmentedFrame>
-        <DividedStack>
-          <div className="card mb-0">
-            <div className="card-body d-flex flex-column flex-md-row justify-content-between align-items-center">
-              <div className="d-flex align-items-center mb-3 mb-md-0">
-                <div
-                  className="bg-primary bg-opacity-10 text-primary rounded-circle d-flex align-items-center justify-content-center me-3"
-                  style={{ width: 48, height: 48 }}
-                >
-                  <span className="fs-4 material-symbols-rounded">key</span>
-                </div>
-                <div>
-                  <h5 className="mb-1 fw-semibold">我的 API 令牌</h5>
-                  <p className="mb-0 text-muted small">
-                    为安全起见，令牌默认隐藏；可在此页查看/复制。令牌撤销后无法查看。
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                className="btn btn-primary btn-sm"
-                data-bs-toggle="modal"
-                data-bs-target="#createTokenModal"
-              >
-                <span className="me-1 material-symbols-rounded">add</span> 创建令牌
-              </button>
-            </div>
-          </div>
+      <div className="rlm-page-head d-flex flex-wrap align-items-end justify-content-between gap-3">
+        <div>
+          <h1>API 令牌</h1>
+          <p className="rlm-page-sub">令牌默认隐藏，可在此页查看/复制；撤销后无法再查看。</p>
+        </div>
+        <button
+          type="button"
+          className="btn btn-primary btn-sm"
+          data-bs-toggle="modal"
+          data-bs-target="#createTokenModal"
+        >
+          <span className="me-1 material-symbols-rounded">add</span> 创建令牌
+        </button>
+      </div>
 
-          {tokensErr ? (
-            <div className="alert alert-danger mb-0" role="alert">
-              <span className="me-2 material-symbols-rounded">report</span>
-              {tokensErr}
-            </div>
-          ) : null}
+      {tokensErr ? (
+        <div className="alert alert-danger" role="alert">
+          <span className="me-2 material-symbols-rounded">report</span>
+          {tokensErr}
+        </div>
+      ) : null}
 
-          <div className="card h-100 overflow-hidden mb-0">
-            <div className="card-body p-0">
-              <div className="table-responsive">
-                <table className="table table-hover align-middle mb-0">
-                  <thead className="bg-light text-muted small text-uppercase">
-                    <tr>
-                      <th scope="col" className="fw-medium ps-4 py-3">
-                        名称
-                      </th>
-                      <th scope="col" className="fw-medium py-3">
-                        渠道组
-                      </th>
-                      <th scope="col" className="fw-medium py-3">
-                        预览
-                      </th>
-                      <th scope="col" className="fw-medium py-3">
-                        状态
-                      </th>
-                      <th scope="col" className="fw-medium text-end pe-4 py-3">
-                        操作
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="border-top-0">
-                    {tokensLoading ? (
-                      <tr>
-                        <td colSpan={5} className="text-center py-5 text-muted">
-                          加载中…
-                        </td>
-                      </tr>
-                    ) : tokens.length === 0 ? (
-                      <tr>
-                        <td colSpan={5} className="text-center py-5 text-muted">
-                          <div className="mb-2">
-                            <span className="fs-3 text-light-emphasis material-symbols-rounded">inbox</span>
-                          </div>
-                          暂无令牌，点击右上角按钮创建一个。
-                        </td>
-                      </tr>
+      <div className="card mb-0 overflow-hidden">
+        <table className="table align-middle mb-0">
+          <thead>
+            <tr>
+              <th style={{ width: '18%' }}>名称</th>
+              <th style={{ width: '16%' }}>渠道组</th>
+              <th>密钥</th>
+              <th style={{ width: '10%' }}>状态</th>
+              <th className="text-end" style={{ width: '30%' }}>
+                操作
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {tokensLoading ? (
+              <tr>
+                <td colSpan={5} className="text-center py-5 text-muted">
+                  加载中…
+                </td>
+              </tr>
+            ) : tokens.length === 0 ? (
+              <tr>
+                <td colSpan={5} className="text-center py-5 text-muted">
+                  <div className="mb-2">
+                    <span className="fs-3 material-symbols-rounded">inbox</span>
+                  </div>
+                  暂无令牌，点击右上角按钮创建一个。
+                </td>
+              </tr>
+            ) : (
+              tokens.map((t) => (
+                <tr key={t.id}>
+                  <td>
+                    {t.name ? (
+                      <span className="fw-medium">{t.name}</span>
                     ) : (
-                      tokens.map((t) => (
-                        <tr key={t.id}>
-                          <td className="ps-4 py-3">
-                            {t.name ? (
-                              <span className="fw-medium text-dark">{t.name}</span>
-                            ) : (
-                              <span className="text-muted small fst-italic">无备注</span>
-                            )}
-                          </td>
-                          <td className="py-3">
-                            {t.channel_group_id ? (
-                              <span className="small text-dark">{formatTokenChannelGroup(t)}</span>
-                            ) : (
-                              <span className="text-muted small">-</span>
-                            )}
-                          </td>
-                          <td className="py-3">
-                            {revealed[t.id] ? (
-                              <code className="bg-light px-2 py-1 rounded text-dark border user-select-all">
-                                {revealed[t.id]}
-                              </code>
-                            ) : (
-                              <span className="text-muted small">-</span>
-                            )}
-                          </td>
-                          <td className="py-3">
-                            {t.status === 1 ? (
-                              <span className="badge bg-success bg-opacity-10 text-success rounded-pill px-2">
-                                活跃
-                              </span>
-                            ) : (
-                              <span className="badge bg-secondary bg-opacity-10 text-secondary rounded-pill px-2">
-                                已撤销
-                              </span>
-                            )}
-                          </td>
-                          <td className="text-end pe-4 py-3">
-                            {t.status === 1 ? (
-                              <>
-                                <button
-                                  className="btn btn-link text-secondary p-0 text-decoration-none small"
-                                  type="button"
-                                  disabled={tokensLoading || revealLoading[t.id]}
-                                  onClick={async () => {
-                                    setTokensErr('');
-                                    if (revealed[t.id]) {
-                                      setRevealed((prev) => {
-                                        const next = { ...prev };
-                                        delete next[t.id];
-                                        return next;
-                                      });
-                                      return;
-                                    }
-                                    try {
-                                      await revealToken(t.id);
-                                    } catch (e) {
-                                      setTokensErr(e instanceof Error ? e.message : '查看失败');
-                                    }
-                                  }}
-                                >
-                                  {revealed[t.id] ? '隐藏' : '查看'}
-                                </button>
-
-                                <span className="text-muted small mx-2">|</span>
-
-                                <button
-                                  className="btn btn-link text-secondary p-0 text-decoration-none small"
-                                  type="button"
-                                  disabled={tokensLoading || revealLoading[t.id]}
-                                  onClick={async () => {
-                                    setTokensErr('');
-                                    try {
-                                      const tok = revealed[t.id] ? revealed[t.id] : await revealToken(t.id);
-                                      await copyToken(tok, t.id);
-                                    } catch (e) {
-                                      setTokensErr(e instanceof Error ? e.message : '复制失败');
-                                    }
-                                  }}
-                                >
-                                  {copiedID === t.id ? '已复制' : '复制'}
-                                </button>
-
-                                <span className="text-muted small mx-2">|</span>
-
-                                <button
-                                  className="btn btn-link text-secondary p-0 text-decoration-none small"
-                                  type="button"
-                                  disabled={tokensLoading}
-                                  onClick={() => void openTokenChannelModal(t)}
-                                >
-                                  渠道组
-                                </button>
-
-                                <span className="text-muted small mx-2">|</span>
-
-                                <button
-                                  className="btn btn-link text-secondary p-0 text-decoration-none small"
-                                  type="button"
-                                  disabled={tokensLoading}
-                                  onClick={() => void openTokenUsageModal(t)}
-                                >
-                                  用量
-                                </button>
-
-                                <span className="text-muted small mx-2">|</span>
-                              </>
-                            ) : null}
-
-                            <button
-                              className="btn btn-link text-primary p-0 text-decoration-none small"
-                              type="button"
-                              disabled={tokensLoading}
-                              onClick={async () => {
-                                setTokensErr('');
-                                setRevealed((prev) => {
-                                  const next = { ...prev };
-                                  delete next[t.id];
-                                  return next;
-                                });
-                                try {
-                                  const res = await rotateUserToken(t.id);
-                                  if (!res.success) {
-                                    throw new Error(res.message || '重新生成失败');
-                                  }
-                                  const tok = res.data?.token;
-                                  await refresh();
-                                  if (tok) openGeneratedTokenModal(tok);
-                                } catch (e) {
-                                  setTokensErr(e instanceof Error ? e.message : '重新生成失败');
-                                }
-                              }}
-                            >
-                              重新生成
-                            </button>
-
-                            <span className="text-muted small mx-2">|</span>
-
-                            {t.status === 1 ? (
-                              <button
-                                className="btn btn-link text-danger p-0 text-decoration-none small"
-                                type="button"
-                                disabled={tokensLoading}
-                                onClick={async () => {
-                                  setTokensErr('');
-                                  try {
-                                    const res = await revokeUserToken(t.id);
-                                    if (!res.success) {
-                                      throw new Error(res.message || '撤销失败');
-                                    }
-                                    await refresh();
-                                  } catch (e) {
-                                    setTokensErr(e instanceof Error ? e.message : '撤销失败');
-                                  }
-                                }}
-                              >
-                                撤销
-                              </button>
-                            ) : (
-                              <button
-                                className="btn btn-link text-danger p-0 text-decoration-none small"
-                                type="button"
-                                disabled={tokensLoading}
-                                onClick={async () => {
-                                  setTokensErr('');
-                                  try {
-                                    const res = await deleteUserToken(t.id);
-                                    if (!res.success) {
-                                      throw new Error(res.message || '删除失败');
-                                    }
-                                    await refresh();
-                                  } catch (e) {
-                                    setTokensErr(e instanceof Error ? e.message : '删除失败');
-                                  }
-                                }}
-                              >
-                                删除
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      ))
+                      <span className="text-muted small fst-italic">无备注</span>
                     )}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        </DividedStack>
-      </SegmentedFrame>
+                  </td>
+                  <td>
+                    {t.channel_group_id ? (
+                      <span className="small">{formatTokenChannelGroup(t)}</span>
+                    ) : (
+                      <span className="text-muted small">-</span>
+                    )}
+                  </td>
+                  <td>
+                    {t.status !== 1 ? (
+                      <span className="text-muted small">-</span>
+                    ) : revealed[t.id] ? (
+                      <code className="rlm-key-code user-select-all">{revealed[t.id]}</code>
+                    ) : (
+                      <span className="rlm-key-mask">••••••••••••••••</span>
+                    )}
+                  </td>
+                  <td>
+                    {t.status === 1 ? (
+                      <span className="rlm-dot-state">活跃</span>
+                    ) : (
+                      <span className="rlm-dot-state off">已撤销</span>
+                    )}
+                  </td>
+                  <td className="text-end">
+                    {t.status === 1 ? (
+                      <>
+                        <button
+                          className="rlm-row-act mute"
+                          type="button"
+                          disabled={tokensLoading || revealLoading[t.id]}
+                          onClick={async () => {
+                            setTokensErr('');
+                            if (revealed[t.id]) {
+                              setRevealed((prev) => {
+                                const next = { ...prev };
+                                delete next[t.id];
+                                return next;
+                              });
+                              return;
+                            }
+                            try {
+                              await revealToken(t.id);
+                            } catch (e) {
+                              setTokensErr(e instanceof Error ? e.message : '查看失败');
+                            }
+                          }}
+                        >
+                          {revealed[t.id] ? '隐藏' : '查看'}
+                        </button>
+                        <button
+                          className="rlm-row-act mute"
+                          type="button"
+                          disabled={tokensLoading || revealLoading[t.id]}
+                          onClick={async () => {
+                            setTokensErr('');
+                            try {
+                              const tok = revealed[t.id] ? revealed[t.id] : await revealToken(t.id);
+                              await copyToken(tok, t.id);
+                            } catch (e) {
+                              setTokensErr(e instanceof Error ? e.message : '复制失败');
+                            }
+                          }}
+                        >
+                          {copiedID === t.id ? '已复制' : '复制'}
+                        </button>
+                        <button
+                          className="rlm-row-act"
+                          type="button"
+                          disabled={tokensLoading}
+                          onClick={() => void openTokenChannelModal(t)}
+                        >
+                          渠道组
+                        </button>
+                        <button
+                          className="rlm-row-act"
+                          type="button"
+                          disabled={tokensLoading}
+                          onClick={() => void openTokenUsageModal(t)}
+                        >
+                          用量
+                        </button>
+                      </>
+                    ) : null}
+
+                    <button
+                      className="rlm-row-act"
+                      type="button"
+                      disabled={tokensLoading}
+                      onClick={async () => {
+                        setTokensErr('');
+                        setRevealed((prev) => {
+                          const next = { ...prev };
+                          delete next[t.id];
+                          return next;
+                        });
+                        try {
+                          const res = await rotateUserToken(t.id);
+                          if (!res.success) {
+                            throw new Error(res.message || '重新生成失败');
+                          }
+                          const tok = res.data?.token;
+                          await refresh();
+                          if (tok) openGeneratedTokenModal(tok);
+                        } catch (e) {
+                          setTokensErr(e instanceof Error ? e.message : '重新生成失败');
+                        }
+                      }}
+                    >
+                      重新生成
+                    </button>
+
+                    {t.status === 1 ? (
+                      <button
+                        className="rlm-row-act danger"
+                        type="button"
+                        disabled={tokensLoading}
+                        onClick={async () => {
+                          setTokensErr('');
+                          try {
+                            const res = await revokeUserToken(t.id);
+                            if (!res.success) {
+                              throw new Error(res.message || '撤销失败');
+                            }
+                            await refresh();
+                          } catch (e) {
+                            setTokensErr(e instanceof Error ? e.message : '撤销失败');
+                          }
+                        }}
+                      >
+                        撤销
+                      </button>
+                    ) : (
+                      <button
+                        className="rlm-row-act danger"
+                        type="button"
+                        disabled={tokensLoading}
+                        onClick={async () => {
+                          setTokensErr('');
+                          try {
+                            const res = await deleteUserToken(t.id);
+                            if (!res.success) {
+                              throw new Error(res.message || '删除失败');
+                            }
+                            await refresh();
+                          } catch (e) {
+                            setTokensErr(e instanceof Error ? e.message : '删除失败');
+                          }
+                        }}
+                      >
+                        删除
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
 
       {/* programmatically open the generated-token modal */}
       <button

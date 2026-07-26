@@ -9,9 +9,7 @@ import {
   type UsageEventDetail,
   type UsageWindow,
 } from '../api/usage';
-import { useAuth } from '../auth/AuthContext';
 import { DateRangePicker, SelectPicker } from '../components/DateRangePicker';
-import { SegmentedFrame } from '../components/SegmentedFrame';
 import {
   UsageAdvancedFiltersDropdown,
   type UsageAdvancedFiltersDropdownHandle,
@@ -22,8 +20,6 @@ import { formatLocalDate, formatLocalDateTimeMinute } from './usage/usageUtils';
 import { todayDateInputLocal } from '../utils/dateInput';
 
 export function UsagePage() {
-  const { user } = useAuth();
-
   const [data, setData] = useState<UsageWindow | null>(null);
   const [events, setEvents] = useState<UsageEvent[]>([]);
   const [loading, setLoading] = useState(true);
@@ -148,9 +144,6 @@ export function UsagePage() {
   const rangeSinceText = data ? formatLocalDateTimeMinute(String(data.since)) : '';
   const rangeUntilText = data ? formatLocalDateTimeMinute(String(data.until)) : '';
 
-  const selfEmail = (user?.email || user?.username || '').toString().trim() || '-';
-  const selfID = typeof user?.id === 'number' ? user.id : '-';
-
   const onPrevPage = () => {
     const nextStack = beforeStack.slice(0, -1);
     setBeforeStack(nextStack);
@@ -168,23 +161,21 @@ export function UsagePage() {
 
   return (
     <div className="fade-in-up">
-      <SegmentedFrame>
-        <div>
-          <div className="d-flex justify-content-between align-items-center mb-3">
-            <div>
-              <h3 className="mb-1 fw-bold">用量统计</h3>
-              <div className="text-muted small">按日期范围汇总用量，并支持事件明细查看。</div>
-            </div>
+      <div className="rlm-segmented">
+        <div className="rlm-page-head mb-0">
+          <h1>用量统计</h1>
+          <p className="rlm-page-sub">按日期范围汇总用量，点击行展开事件明细。</p>
+        </div>
+
+        {err ? (
+          <div className="alert alert-danger mb-0">
+            <span className="me-2 material-symbols-rounded">warning</span>
+            {err}
           </div>
+        ) : null}
 
-          {err ? (
-            <div className="alert alert-danger mb-3">
-              <span className="me-2 material-symbols-rounded">warning</span>
-              {err}
-            </div>
-          ) : null}
-
-          <div className="card border-0 shadow-sm mb-0">
+        <div>
+          <div className="card mb-0">
             <div className="card-body py-3 px-4">
               <div className="d-flex flex-wrap align-items-end gap-3">
                 <div className="d-flex flex-wrap align-items-center gap-2">
@@ -304,32 +295,25 @@ export function UsagePage() {
         {loading ? (
           <div className="text-muted">加载中…</div>
         ) : data ? (
-          <div className="row g-4">
-            <div className="col-12">
-              <UsageSummaryCard data={data} rangeSinceText={rangeSinceText} rangeUntilText={rangeUntilText} />
-            </div>
-
-            <div className="col-12">
-              <UsageEventsCard
-                events={events}
-                tokenByID={tokenByID}
-                expandedID={expandedID}
-                setExpandedID={setExpandedID}
-                loadDetail={loadDetail}
-                detailLoadingID={detailLoadingID}
-                detailByEventID={detailByEventID}
-                canPrev={canPrev}
-                canNext={canNext}
-                loading={loading}
-                onPrevPage={onPrevPage}
-                onNextPage={onNextPage}
-                selfEmail={selfEmail}
-                selfID={selfID}
-              />
-            </div>
-          </div>
+          <>
+            <UsageSummaryCard data={data} rangeSinceText={rangeSinceText} rangeUntilText={rangeUntilText} />
+            <UsageEventsCard
+              events={events}
+              tokenByID={tokenByID}
+              expandedID={expandedID}
+              setExpandedID={setExpandedID}
+              loadDetail={loadDetail}
+              detailLoadingID={detailLoadingID}
+              detailByEventID={detailByEventID}
+              canPrev={canPrev}
+              canNext={canNext}
+              loading={loading}
+              onPrevPage={onPrevPage}
+              onNextPage={onNextPage}
+            />
+          </>
         ) : null}
-      </SegmentedFrame>
+      </div>
     </div>
   );
 }
