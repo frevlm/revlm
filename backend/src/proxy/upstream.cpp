@@ -20,14 +20,8 @@
 #include <vector>
 #include "util/strings.hpp"
 
-#include <httplib.h>
+#include "net/curl_multi_pool.hpp"
 #include <netdb.h>
-#include <chrono>
-#include <condition_variable>
-#include <deque>
-#include <memory>
-#include <mutex>
-#include <thread>
 
 namespace revlm
 {
@@ -351,22 +345,6 @@ bool upstream_channel_allows_private_target(std::string_view base_url)
 namespace
 {
 
-int resolve_port(const ValidatedBaseUrl &base_url)
-{
-    if (!base_url.port.empty()) {
-        return std::stoi(base_url.port);
-    }
-    return base_url.scheme == "https" ? 443 : 80;
-}
-
-std::string request_target_path(const UpstreamPreparedRequest &prepared)
-{
-    const size_t authority_pos = prepared.url.find("://");
-    const size_t path_pos = authority_pos == std::string::npos ? prepared.url.find('/') :
-                                                                 prepared.url.find('/', authority_pos + 3);
-    return path_pos == std::string::npos ? std::string{ "/" } : prepared.url.substr(path_pos);
-}
-
 void assert_resolved_addresses_allowed(const ValidatedBaseUrl &base_url, bool allow_private_target)
 {
     if (allow_private_target) {
@@ -393,233 +371,29 @@ void assert_resolved_addresses_allowed(const ValidatedBaseUrl &base_url, bool al
     }
 }
 
-std::unique_ptr<httplib::Client> make_client(const ValidatedBaseUrl &base_url, int timeout_ms)
+std::vector<CurlHeader> to_curl_headers(const std::vector<UpstreamHeader> &headers)
 {
-    const int port = resolve_port(base_url);
-    std::string endpoint = base_url.scheme + "://" + base_url.host;
-    const bool default_port = (base_url.scheme == "https" && port == 443) || (base_url.scheme == "http" && port == 80);
-    if (!default_port) {
-        endpoint += ":" + std::to_string(port);
-    }
-    auto client = std::make_unique<httplib::Client>(endpoint);
-    client->set_connection_timeout(timeout_ms / 1000, (timeout_ms % 1000) * 1000);
-    client->set_read_timeout(timeout_ms / 1000, (timeout_ms % 1000) * 1000);
-    client->set_write_timeout(timeout_ms / 1000, (timeout_ms % 1000) * 1000);
-    client->set_follow_location(false);
-    return client;
-}
-
-httplib::Headers to_httplib_headers(const std::vector<UpstreamHeader> &headers)
-{
-    httplib::Headers out;
+    std::vector<CurlHeader> out;
+    out.reserve(headers.size());
     for (const UpstreamHeader &header : headers) {
-        if (iequals(header.name, "Host") || iequals(header.name, "Content-Length") ||
-            iequals(header.name, "Connection")) {
+        if (header.name == "Host" || header.name == "Content-Length" || header.name == "Connection")
             continue;
-        }
-        out.emplace(header.name, header.value);
+        out.push_back({ header.name, header.value });
     }
     return out;
 }
 
-std::string content_type_from_headers(const std::vector<UpstreamHeader> &headers)
-{
-    for (const UpstreamHeader &header : headers) {
-        if (iequals(header.name, "Content-Type")) {
-            return header.value;
-        }
-    }
-    return "application/json";
-}
-
-std::vector<UpstreamHeader> from_httplib_headers(const httplib::Headers &headers)
+std::vector<UpstreamHeader> from_curl_headers(const std::vector<CurlHeader> &headers)
 {
     std::vector<UpstreamHeader> out;
     out.reserve(headers.size());
-    for (const auto &header : headers) {
-        out.push_back({ header.first, header.second });
+    for (const CurlHeader &header : headers) {
+        out.push_back({ header.name, header.value });
     }
     return out;
 }
 
-httplib::Request build_request(const UpstreamPreparedRequest &prepared)
-{
-    httplib::Request req;
-    req.method = prepared.method;
-    req.path = request_target_path(prepared);
-    req.headers = to_httplib_headers(prepared.headers);
-    req.body = prepared.body;
-    if (!prepared.body.empty()) {
-        req.set_header("Content-Type", content_type_from_headers(prepared.headers));
-    }
-    return req;
-}
-
-struct StreamBridgeState {
-    std::mutex mu;
-    std::condition_variable cv;
-    std::deque<std::string> chunks;
-    size_t chunk_offset = 0;
-    bool headers_ready = false;
-    bool done = false;
-    bool worker_error = false;
-    int status_code = 0;
-    std::vector<UpstreamHeader> headers;
-    std::thread worker;
-
-    ~StreamBridgeState()
-    {
-        if (!worker.joinable()) {
-            return;
-        }
-        // If the worker itself drops the last shared_ptr while exiting, joining
-        // here would deadlock (join self). Detach in that case.
-        if (worker.get_id() == std::this_thread::get_id()) {
-            worker.detach();
-            return;
-        }
-        worker.join();
-    }
-
-    StreamBridgeState() = default;
-    StreamBridgeState(const StreamBridgeState &) = delete;
-    StreamBridgeState &operator=(const StreamBridgeState &) = delete;
-};
-
-ssize_t stream_bridge_read(const std::shared_ptr<StreamBridgeState> &state, char *out, size_t size)
-{
-    std::unique_lock<std::mutex> lock(state->mu);
-    for (;;) {
-        if (!state->chunks.empty()) {
-            while (!state->chunks.empty() && state->chunk_offset >= state->chunks.front().size()) {
-                state->chunks.pop_front();
-                state->chunk_offset = 0;
-            }
-            if (!state->chunks.empty()) {
-                const std::string &front = state->chunks.front();
-                const size_t available = front.size() - state->chunk_offset;
-                const size_t n = std::min(size, available);
-                std::memcpy(out, front.data() + state->chunk_offset, n);
-                state->chunk_offset += n;
-                return static_cast<ssize_t>(n);
-            }
-        }
-        if (state->done) {
-            return 0;
-        }
-        state->cv.wait_for(lock, std::chrono::milliseconds(100));
-        if (state->worker_error && state->chunks.empty()) {
-            return -1;
-        }
-    }
-}
-
 } // namespace
-
-UpstreamResponse execute_upstream_http_request(const UpstreamPreparedRequest &prepared, int timeout_ms,
-                                               bool allow_private_target)
-{
-    const int effective_timeout_ms = timeout_ms > 0 ? timeout_ms : k_default_upstream_timeout_ms;
-    if (!allow_private_target) {
-        enforce_upstream_ssrf_guard(prepared.base_url);
-    }
-    assert_resolved_addresses_allowed(prepared.base_url, allow_private_target);
-
-    auto client = make_client(prepared.base_url, effective_timeout_ms);
-    httplib::Request req = build_request(prepared);
-    httplib::Response res;
-    httplib::Error err = httplib::Error::Success;
-    if (!client->send(req, res, err) || err != httplib::Error::Success) {
-        throw std::runtime_error("upstream request failed");
-    }
-
-    UpstreamResponse response;
-    response.status_code = res.status;
-    response.headers = from_httplib_headers(res.headers);
-    response.body = std::move(res.body);
-    return response;
-}
-
-UpstreamStreamResponse execute_upstream_http_stream_request(const UpstreamPreparedRequest &prepared, int timeout_ms,
-                                                            bool allow_private_target)
-{
-    const int effective_timeout_ms = timeout_ms > 0 ? timeout_ms : k_default_upstream_timeout_ms;
-    if (!allow_private_target) {
-        enforce_upstream_ssrf_guard(prepared.base_url);
-    }
-    assert_resolved_addresses_allowed(prepared.base_url, allow_private_target);
-
-    auto state = std::make_shared<StreamBridgeState>();
-    auto client = make_client(prepared.base_url, effective_timeout_ms);
-    httplib::Request req = build_request(prepared);
-    req.response_handler = [state](const httplib::Response &response) {
-        std::lock_guard<std::mutex> lock(state->mu);
-        state->status_code = response.status;
-        state->headers = from_httplib_headers(response.headers);
-        state->headers_ready = true;
-        state->cv.notify_all();
-        return true;
-    };
-    req.content_receiver = [state](const char *data, size_t data_length, size_t, size_t) {
-        if (data_length == 0) {
-            return true;
-        }
-        std::lock_guard<std::mutex> lock(state->mu);
-        state->chunks.emplace_back(data, data_length);
-        state->cv.notify_all();
-        return true;
-    };
-
-    state->worker = std::thread([client = std::move(client), req = std::move(req), state]() mutable {
-        const httplib::Result result = client->send(req);
-        std::lock_guard<std::mutex> lock(state->mu);
-        if (!result) {
-            state->worker_error = true;
-        } else {
-            if (!state->headers_ready) {
-                state->status_code = result->status;
-                state->headers = from_httplib_headers(result->headers);
-                state->headers_ready = true;
-            }
-            // Some httplib paths deliver the body via Result instead of content_receiver.
-            if (state->chunks.empty() && !result->body.empty()) {
-                state->chunks.push_back(result->body);
-            }
-        }
-        state->done = true;
-        state->cv.notify_all();
-    });
-
-    {
-        std::unique_lock<std::mutex> lock(state->mu);
-        if (!state->cv.wait_for(lock, std::chrono::milliseconds(effective_timeout_ms),
-                                [&] { return state->headers_ready || state->done; })) {
-            if (state->worker.joinable()) {
-                state->worker.join();
-            }
-            throw std::runtime_error("upstream stream headers timeout");
-        }
-        if (state->worker_error) {
-            state->worker.join();
-            throw std::runtime_error("upstream stream request failed");
-        }
-    }
-
-    UpstreamStreamResponse response;
-    response.request = prepared;
-    response.status_code = state->status_code;
-    response.headers = state->headers;
-    response.initial_body.clear();
-
-    response.stream.poll_fd = -1;
-    response.stream.read = [state](char *out, size_t size) -> ssize_t { return stream_bridge_read(state, out, size); };
-    response.stream.close = [state]() {
-        if (state->worker.joinable()) {
-            state->worker.join();
-        }
-    };
-    return response;
-}
 
 UpstreamTransport make_default_upstream_transport(int timeout_ms, bool allow_private_target)
 {
@@ -640,13 +414,59 @@ UpstreamExecutionResult execute_with_default_transport(const UpstreamExecutor &e
 UpstreamResponse default_upstream_http_transport(const UpstreamPreparedRequest &prepared, int timeout_ms,
                                                  bool allow_private_target)
 {
-    return execute_upstream_http_request(prepared, timeout_ms, allow_private_target);
+    const int effective_timeout_ms = timeout_ms > 0 ? timeout_ms : k_default_upstream_timeout_ms;
+    if (!allow_private_target) {
+        enforce_upstream_ssrf_guard(prepared.base_url);
+    }
+    assert_resolved_addresses_allowed(prepared.base_url, allow_private_target);
+
+    CurlRequest req;
+    req.url = prepared.url;
+    req.method = prepared.method;
+    req.headers = to_curl_headers(prepared.headers);
+    req.initial_body_chunk = prepared.body;
+    req.connect_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
+    req.total_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
+
+    CurlMultiPool pool;
+    CurlResponse cres = pool.execute(req);
+
+    UpstreamResponse response;
+    response.status_code = cres.status_code;
+    response.headers = from_curl_headers(cres.headers);
+    response.body = std::move(cres.body);
+    return response;
 }
 
 UpstreamStreamResponse default_upstream_http_stream_transport(const UpstreamPreparedRequest &prepared, int timeout_ms,
                                                               bool allow_private_target)
 {
-    return execute_upstream_http_stream_request(prepared, timeout_ms, allow_private_target);
+    const int effective_timeout_ms = timeout_ms > 0 ? timeout_ms : k_default_upstream_timeout_ms;
+    if (!allow_private_target) {
+        enforce_upstream_ssrf_guard(prepared.base_url);
+    }
+    assert_resolved_addresses_allowed(prepared.base_url, allow_private_target);
+
+    CurlRequest req;
+    req.url = prepared.url;
+    req.method = prepared.method;
+    req.headers = to_curl_headers(prepared.headers);
+    req.initial_body_chunk = prepared.body;
+    req.connect_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
+    req.total_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
+
+    CurlMultiPool pool;
+    auto result = pool.execute_stream(req);
+
+    UpstreamStreamResponse response;
+    response.request = prepared;
+    response.status_code = result.status_code;
+    response.headers = from_curl_headers(result.headers);
+    response.initial_body = std::move(result.initial_body);
+    response.stream.read = std::move(result.stream_read);
+    response.stream.close = std::move(result.stream_close);
+    response.stream.poll_fd = result.poll_fd;
+    return response;
 }
 
 } // namespace revlm

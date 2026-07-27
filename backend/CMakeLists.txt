@@ -2,6 +2,8 @@ file(GLOB_RECURSE REVLM_CORE_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp")
 list(FILTER REVLM_CORE_SOURCES EXCLUDE REGEX ".*/main\\.cpp$")
 
+find_package(CURL REQUIRED)
+
 add_library(revlm_core ${REVLM_CORE_SOURCES})
 add_library(revlm::core ALIAS revlm_core)
 
@@ -19,6 +21,7 @@ target_link_libraries(revlm_core PUBLIC
   OpenSSL::SSL
   OpenSSL::Crypto
   Threads::Threads
+  CURL::libcurl
 )
 target_link_libraries(revlm_core PRIVATE revlm_warnings)
 target_compile_definitions(revlm_core PRIVATE
