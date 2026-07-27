@@ -278,15 +278,23 @@ static net::awaitable<void> handle_connection(beast::tcp_stream stream,
             beast::error_code ec;
             co_await beast::http::async_read_some(stream, buf, parser, net::redirect_error(net::use_awaitable, ec));
 
-            if (ec == beast::http::error::need_buffer)
+            // buffer_body::put() decrements body.size to the remaining free
+            // space, so bytes written = initial_size - remaining.
+            const size_t bytes_written = sizeof(chunk) - body.size;
+
+            if (ec == beast::http::error::need_buffer) {
+                // Save the partial chunk before re-requesting.
+                body_accum.append(chunk.data(), bytes_written);
                 continue;
+            }
 
             if (ec) {
                 std::cerr << "beast body read error: " << ec.message() << '\n';
                 co_return;
             }
 
-            body_accum.append(chunk.data(), body.size);
+            if (bytes_written > 0)
+                body_accum.append(chunk.data(), bytes_written);
         }
 
         // Build a string_body request from parsed headers + accumulated body.
