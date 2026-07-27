@@ -10,6 +10,8 @@
 #include "proxy/openai_chat.hpp"
 #include "proxy/openai_responses.hpp"
 #include "request/request.hpp"
+#include "store/balance_ledger.hpp"
+#include "store/batch_writer.hpp"
 #include "store/snapshot.hpp"
 #include "users/users.hpp"
 #include "util/json.hpp"
@@ -20,6 +22,7 @@
 #include <cctype>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <functional>
@@ -147,7 +150,7 @@ std::vector<UpstreamHeader> merge_correlation_headers(const std::vector<Upstream
 
 std::optional<json> paygo_balance_gate(long long user_id)
 {
-    if (UserStore::instance().has_positive_user_balance(user_id))
+    if (balance_ledger().has_balance(user_id))
         return std::nullopt;
     return json({ { "error", json({ { "message", "insufficient balance" } }) } });
 }
@@ -162,39 +165,23 @@ bool commit_proxy_usage(ProxyRequest &pr)
         return false;
     if (pr.upstream.channel_id <= 0)
         return false;
+
     const double usd = compute_usd(pr);
-    if (!UserStore::instance().debit_user_balance_usd(pr.auth.user_id, usd))
-        return false;
-    Request req;
-    req.id = pr.id;
-    req.time = pr.time;
-    req.date = pr.time.substr(0, 10);
-    req.user_id = pr.auth.user_id;
-    req.request_id = pr.request_id;
-    req.response_id = pr.upstream.response_id;
-    req.endpoint = pr.http.path;
-    req.method = pr.http.method;
-    req.token_id = pr.auth.token_id;
-    req.input_tokens = pr.usage.input_tokens;
-    req.output_tokens = pr.usage.output_tokens;
-    req.cache_read_tokens = pr.usage.cache_read_tokens;
-    req.cache_creation_1h_tokens = pr.usage.cache_creation_1h_tokens;
-    req.cache_creation_5m_tokens = pr.usage.cache_creation_5m_tokens;
-    req.tier_multiplier = pr.upstream.tier_multiplier;
-    req.service_tier = pr.upstream.service_tier;
-    req.channel_multiplier = pr.upstream.channel_multiplier;
-    req.channel_id = pr.upstream.channel_id;
-    req.status_code = pr.upstream.status_code;
-    req.latency_ms = pr.upstream.latency_ms;
-    req.first_token_latency_ms = pr.upstream.first_token_latency_ms;
-    req.is_stream = pr.is_stream;
-    req.model_name = pr.upstream.model_name;
-    if (!pr.error_class.empty())
-        req.error_class = pr.error_class;
-    if (!pr.error_message.empty())
-        req.error_message = pr.error_message;
-    req.usd = usd;
-    return req.commit(pr.time);
+    const int64_t usd_micro = static_cast<int64_t>(std::round(usd * 1000000.0));
+
+    // Deduct from in-memory ledger. May go slightly negative due to
+    // concurrent requests from the same user — acceptable bounded overdraft
+    // since the gate already verified positive balance.
+    (void)balance_ledger().deduct(pr.auth.user_id, usd_micro);
+
+    // Defer the DB write to the background batch writer.
+    batch_writer().enqueue(pr.id, pr.auth.user_id, pr.auth.token_id, pr.upstream.channel_id, pr.usage.input_tokens,
+                           pr.usage.output_tokens, pr.usage.cache_read_tokens, pr.usage.cache_creation_1h_tokens,
+                           pr.usage.cache_creation_5m_tokens, pr.upstream.tier_multiplier, pr.upstream.service_tier,
+                           pr.upstream.channel_multiplier, pr.upstream.status_code, pr.upstream.latency_ms,
+                           pr.upstream.first_token_latency_ms, pr.is_stream, pr.upstream.model_name, pr.error_class,
+                           pr.error_message, usd_micro, pr.time);
+    return true;
 }
 
 ScheduledUpstreamExecution execute_scheduled_upstream(long long channel_id, UpstreamRequest downstream)

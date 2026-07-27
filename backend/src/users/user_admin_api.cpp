@@ -1,6 +1,7 @@
 #include "users/user_admin_api.hpp"
 
 #include "auth/security.hpp"
+#include "store/balance_ledger.hpp"
 #include "users/user_api.hpp"
 #include "users/users.hpp"
 #include "store/database.hpp"
@@ -10,6 +11,7 @@
 #include "util/user_input.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <exception>
 #include <stdexcept>
 #include <string>
@@ -198,6 +200,9 @@ json admin_add_user_balance_response(long long user_id, std::string_view raw_req
             return json({ { "success", false }, { "message", "用户不存在" } });
         }
         const double balance = UserStore::instance().get_user_balance_usd(user_id);
+        // Immediately sync the in-memory ledger so the user's new balance takes
+        // effect without waiting for a snapshot rebuild.
+        balance_ledger().admin_adjust_balance(user_id, static_cast<int64_t>(std::round(balance * 1000000.0)));
         return json({ { "success", true }, { "data", json{ { "balance_usd", balance } } } });
     } catch (const std::invalid_argument &err) {
         return json({ { "success", false }, { "message", err.what() } });

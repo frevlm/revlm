@@ -1,10 +1,12 @@
 #include "store/snapshot.hpp"
 
 #include "config/config.hpp"
+#include "store/balance_ledger.hpp"
 #include "store/database.hpp"
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -20,6 +22,7 @@ std::mutex g_rebuild_mutex;
 std::atomic<bool> g_stop{ false };
 std::thread g_thread;
 std::once_flag g_thread_started;
+std::once_flag g_balances_seeded; // Only seed BalanceLedger on first rebuild.
 
 // Timestamp of the last completed rebuild, guarded by g_rebuild_mutex.
 std::chrono::steady_clock::time_point g_last_rebuild;
@@ -36,6 +39,16 @@ void do_rebuild()
         double bal = std::stod(row[1].value_or("0"));
         snap->balances[uid] = bal;
     }
+
+    // Seed the in-memory BalanceLedger from snapshot balances (micro-USD).
+    // Only on first rebuild — subsequent rebuilds must not overwrite the atomic
+    // values that track live in-flight deductions.
+    std::call_once(g_balances_seeded, [&]() {
+        for (const auto &[uid, bal] : snap->balances) {
+            int64_t balance_micro = static_cast<int64_t>(std::round(bal * 1000000.0));
+            balance_ledger().load_balance(uid, balance_micro);
+        }
+    });
 
     // b) active tokens
     auto token_rows = sql_query_rows(db, "SELECT t.id, t.user_id, t.token_hash, t.channel_group_id "
