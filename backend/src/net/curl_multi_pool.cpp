@@ -584,6 +584,15 @@ CurlResponse CurlMultiPool::execute(const CurlRequest &request)
     setup_common_options(easy, request);
     setup_body_options(easy, request);
 
+    // DNS pin: prevent rebinding between SSRF validation and curl's own
+    // getaddrinfo call.  Only set when upstream.cpp provides a pin.
+    CurlSlistGuard dns_guard;
+    if (!request.dns_pin.empty()) {
+        dns_guard.list = curl_slist_append(dns_guard.list, request.dns_pin.c_str());
+        if (dns_guard.list)
+            curl_easy_setopt(easy, CURLOPT_RESOLVE, dns_guard.list);
+    }
+
     CurlSlistGuard header_guard;
     setup_headers(easy, request, header_guard);
 
@@ -622,6 +631,15 @@ CurlMultiPool::StreamResult CurlMultiPool::execute_stream(const CurlRequest &req
 
     setup_common_options(easy, request);
     setup_body_options(easy, request);
+
+    // DNS pin: prevent rebinding between SSRF validation and curl's own
+    // getaddrinfo call.  Only set when upstream.cpp provides a pin.
+    CurlSlistGuard dns_guard;
+    if (!request.dns_pin.empty()) {
+        dns_guard.list = curl_slist_append(dns_guard.list, request.dns_pin.c_str());
+        if (dns_guard.list)
+            curl_easy_setopt(easy, CURLOPT_RESOLVE, dns_guard.list);
+    }
 
     CurlSlistGuard header_guard;
     setup_headers(easy, request, header_guard);

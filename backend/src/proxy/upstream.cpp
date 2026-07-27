@@ -249,10 +249,10 @@ bool upstream_channel_allows_private_target(std::string_view base_url)
 namespace
 {
 
-void assert_resolved_addresses_allowed(const ValidatedBaseUrl &base_url, bool allow_private_target)
+std::string assert_resolved_addresses_allowed(const ValidatedBaseUrl &base_url, bool allow_private_target)
 {
     if (allow_private_target) {
-        return;
+        return {};
     }
     addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
@@ -262,17 +262,28 @@ void assert_resolved_addresses_allowed(const ValidatedBaseUrl &base_url, bool al
     if (::getaddrinfo(base_url.host.c_str(), port.c_str(), &hints, &result) != 0 || result == nullptr) {
         throw std::runtime_error("upstream DNS resolution failed");
     }
-    bool allowed = false;
+    std::string pin;
     for (addrinfo *item = result; item != nullptr; item = item->ai_next) {
         if (is_safe_upstream_sockaddr(item->ai_addr, item->ai_addrlen)) {
-            allowed = true;
+            char ip_str[INET6_ADDRSTRLEN];
+            if (item->ai_family == AF_INET) {
+                ::inet_ntop(AF_INET, &reinterpret_cast<sockaddr_in *>(item->ai_addr)->sin_addr, ip_str, sizeof(ip_str));
+            } else if (item->ai_family == AF_INET6) {
+                ::inet_ntop(AF_INET6, &reinterpret_cast<sockaddr_in6 *>(item->ai_addr)->sin6_addr, ip_str,
+                            sizeof(ip_str));
+            } else {
+                continue;
+            }
+            // CURLOPT_RESOLVE format: "host:port:address"
+            pin = base_url.host + ":" + port + ":" + std::string{ ip_str };
             break;
         }
     }
     ::freeaddrinfo(result);
-    if (!allowed) {
+    if (pin.empty()) {
         throw std::runtime_error("upstream resolved to blocked address");
     }
+    return pin;
 }
 
 std::vector<CurlHeader> to_curl_headers(const std::vector<UpstreamHeader> &headers)
@@ -322,7 +333,7 @@ UpstreamResponse default_upstream_http_transport(const UpstreamPreparedRequest &
     if (!allow_private_target) {
         enforce_upstream_ssrf_guard(prepared.base_url);
     }
-    assert_resolved_addresses_allowed(prepared.base_url, allow_private_target);
+    std::string dns_pin = assert_resolved_addresses_allowed(prepared.base_url, allow_private_target);
 
     CurlRequest req;
     req.url = prepared.url;
@@ -331,6 +342,7 @@ UpstreamResponse default_upstream_http_transport(const UpstreamPreparedRequest &
     req.initial_body_chunk = prepared.body;
     req.connect_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
     req.total_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
+    req.dns_pin = std::move(dns_pin);
 
     CurlMultiPool pool;
     CurlResponse cres = pool.execute(req);
@@ -349,7 +361,7 @@ UpstreamStreamResponse default_upstream_http_stream_transport(const UpstreamPrep
     if (!allow_private_target) {
         enforce_upstream_ssrf_guard(prepared.base_url);
     }
-    assert_resolved_addresses_allowed(prepared.base_url, allow_private_target);
+    std::string dns_pin = assert_resolved_addresses_allowed(prepared.base_url, allow_private_target);
 
     CurlRequest req;
     req.url = prepared.url;
@@ -358,6 +370,7 @@ UpstreamStreamResponse default_upstream_http_stream_transport(const UpstreamPrep
     req.initial_body_chunk = prepared.body;
     req.connect_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
     req.total_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
+    req.dns_pin = std::move(dns_pin);
 
     CurlMultiPool pool;
     auto result = pool.execute_stream(req);

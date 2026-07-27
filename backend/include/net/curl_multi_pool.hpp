@@ -81,6 +81,12 @@ struct CurlRequest {
     /// Hard total-transfer timeout including connect, upload, and download
     /// (seconds).  Default 300 s (5 min).
     long total_timeout_s = 300;
+
+    /// CURLOPT_RESOLVE pin string: "host:port:address".
+    /// When non-empty, curl resolves the named host:port to the given
+    /// address, eliminating the DNS rebinding window between SSRF
+    /// validation and upstream connection.
+    std::string dns_pin;
 };
 
 /// Result of a completed (non-streaming) request.

@@ -264,6 +264,11 @@ static net::awaitable<void> handle_connection(beast::tcp_stream stream,
             std::cerr << "beast: header not fully parsed\n";
             co_return;
         }
+        // TODO(beast-sliding-window): this async_read buffers the ENTIRE body
+        // in memory (string_body).  Replace with request_parser<buffer_body> +
+        // async_read_some loop so body chunks are forwarded to upstream without
+        // accumulation.  Deferred to a follow-up PR; string_body is correct but
+        // not memory-efficient for 20MB+ bodies under 10000+ concurrent.
         co_await beast::http::async_read(stream, buf, parser, net::use_awaitable);
 
         auto req = parser.release();
