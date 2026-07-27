@@ -248,10 +248,22 @@ static net::awaitable<void> handle_connection(beast::tcp_stream stream,
         // Parse one request.  Keep-alive is not supported — close after
         // every response (matches the existing httplib server which sets
         // keep_alive_max_count=1).
+        // Parse headers first, then body separately.
+        // This is a stepping stone toward true sliding-window body forwarding:
+        // later the parser type will be changed to buffer_body, and async_read
+        // replaced with async_read_some in a loop so body chunks are forwarded
+        // to upstream as they arrive instead of accumulating in memory.
+        // TODO(beast-sliding-window): switch to request_parser<buffer_body> +
+        // async_read_some loop to forward body chunks without buffering.
         beast::http::request_parser<beast::http::string_body> parser;
         parser.body_limit(static_cast<std::uint64_t>(config().http_max_body_bytes));
         parser.header_limit(static_cast<std::uint32_t>(config().http_max_header_bytes));
 
+        co_await beast::http::async_read_header(stream, buf, parser, net::use_awaitable);
+        if (!parser.is_header_done()) {
+            std::cerr << "beast: header not fully parsed\n";
+            co_return;
+        }
         co_await beast::http::async_read(stream, buf, parser, net::use_awaitable);
 
         auto req = parser.release();

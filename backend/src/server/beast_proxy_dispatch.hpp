@@ -119,6 +119,7 @@ inline ProxyRequest make_beast_proxy_request(const boost::beast::http::request<b
 
     pr.http.body = req.body();
     pr.http.client_ip = remote_addr.empty() ? "127.0.0.1" : std::string{ remote_addr };
+    pr.is_stream = true; // Proxy always sends as stream; Gateway detects actual SSE from response Content-Type.
 
     // Copy headers, stripping auth / correlation fields.
     for (auto it = req.begin(); it != req.end(); ++it) {
