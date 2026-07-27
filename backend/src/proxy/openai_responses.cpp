@@ -4,7 +4,6 @@
 #include "proxy/upstream.hpp"
 #include "util/strings.hpp"
 
-#include <httplib.h>
 #include <string>
 #include <string_view>
 #include <vector>

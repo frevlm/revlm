@@ -1,7 +1,6 @@
 #include "proxy/anthropics_messages.hpp"
 
 #include <functional>
-#include <httplib.h>
 
 namespace revlm
 {

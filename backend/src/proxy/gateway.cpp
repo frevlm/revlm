@@ -26,7 +26,6 @@
 #include <cstring>
 #include <exception>
 #include <functional>
-#include <httplib.h>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -414,8 +413,8 @@ std::string build_synthetic_stream_response_head(int status, std::string_view co
 namespace
 {
 
-constexpr size_t kMaxSseLineBytes = 64 * 1024;
-constexpr size_t kMaxSseEventBytes = 256 * 1024;
+constexpr size_t kMaxSseLineBytes = 1024 * 1024; // 1 MiB
+constexpr size_t kMaxSseEventBytes = 2048 * 1024; // 2 MiB
 constexpr size_t kFlushBytes = 1024;
 constexpr int kDisconnectDrainTimeoutMs = 1500;
 

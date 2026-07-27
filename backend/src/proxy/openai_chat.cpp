@@ -1,7 +1,6 @@
 #include "proxy/openai_chat.hpp"
 
 #include <functional>
-#include <httplib.h>
 
 namespace revlm
 {
