@@ -9,6 +9,7 @@
 #include "server/http_server.hpp"
 #include "store/database.hpp"
 #include "store/schema.hpp"
+#include "store/snapshot.hpp"
 
 namespace
 {
@@ -33,6 +34,8 @@ int main()
         revlm::init_database();
         revlm::ensure_schema(revlm::database());
         std::cerr << "database schema ready\n";
+        revlm::snapshot_rebuild();
+        std::cerr << "snapshot ready\n";
         revlm::HttpServer server;
         int exit_code = 0;
         std::atomic_bool server_done{ false };
@@ -55,6 +58,7 @@ int main()
             running.store(false);
         }
         server_thread.join();
+        revlm::snapshot_shutdown();
         return exit_code;
     } catch (const std::exception &err) {
         std::cerr << "failed to start revlm C++ skeleton: " << err.what() << '\n';

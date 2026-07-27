@@ -1,6 +1,7 @@
 #include "channels/channel_groups.hpp"
 
 #include "store/database.hpp"
+#include "store/snapshot.hpp"
 #include "revlm_entities-odb.hxx"
 
 #include <odb/database.hxx>
@@ -124,6 +125,7 @@ int ChannelGroupStore::create_channel_group(std::string_view name, std::string_v
     ScopedTransaction t(db_);
     db_.persist(g);
     t.commit();
+    snapshot_invalidate();
     return static_cast<int>(g.id);
 }
 
@@ -140,6 +142,7 @@ bool ChannelGroupStore::update_channel_group(long long id, std::string_view name
     p->price_multiplier = price_multiplier;
     db_.update(*p);
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 
@@ -153,6 +156,7 @@ bool ChannelGroupStore::delete_channel_group(long long id)
     sql_exec(db_, "UPDATE user_tokens SET channel_group_id=0 WHERE channel_group_id=" + std::to_string(id));
     db_.erase(*p);
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 
@@ -166,6 +170,7 @@ bool ChannelGroupStore::add_channel_group_member(long long id, Channel channel)
     p->channel_ids.push_back(channel.id);
     db_.update(*p);
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 
@@ -180,6 +185,7 @@ bool ChannelGroupStore::remove_channel_group_member(long long id, long long chan
     ids.erase(std::remove(ids.begin(), ids.end(), channel_id), ids.end());
     db_.update(*p);
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 
@@ -196,6 +202,7 @@ bool ChannelGroupStore::create_channel_group_member(long long id, std::vector<Ch
     }
     db_.update(*p);
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 

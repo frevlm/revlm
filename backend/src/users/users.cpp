@@ -2,6 +2,7 @@
 
 #include "auth/session.hpp"
 #include "store/database.hpp"
+#include "store/snapshot.hpp"
 #include "revlm_entities-odb.hxx"
 
 #include <odb/database.hxx>
@@ -62,6 +63,7 @@ long long UserStore::create_user(User user)
     ScopedTransaction t(db_);
     db_.persist(user);
     t.commit();
+    snapshot_invalidate();
     return user.id;
 }
 
@@ -123,6 +125,7 @@ bool UserStore::update_user(const User &user)
     p->balance_usd = user.balance_usd;
     db_.update(*p);
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 
@@ -143,6 +146,7 @@ bool UserStore::delete_user(long long user_id)
     SessionStore::instance().delete_all_for_user(user_id);
     db_.erase(*p);
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 

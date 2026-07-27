@@ -3,6 +3,7 @@
 #include "auth/crypto.hpp"
 #include "request/request.hpp"
 #include "store/database.hpp"
+#include "store/snapshot.hpp"
 
 #include <cassert>
 #include <cstddef>
@@ -102,6 +103,7 @@ long long TokenStore::create_user_token(long long user_id, const odb::nullable<s
                       sql_quote(db_, hash) + ", " + sql_quote(db_, raw_token) + ", 1, 0)");
     const auto id_str = sql_query_one(db_, "SELECT LAST_INSERT_ID()");
     t.commit();
+    snapshot_invalidate();
     return id_str ? std::stoll(*id_str) : 0;
 }
 
@@ -178,6 +180,7 @@ bool TokenStore::rotate_user_token(long long user_id, long long token_id, std::s
                       ", token_plain=" + sql_quote(db_, raw_token) + ", status=1 WHERE id=" + std::to_string(token_id) +
                       " AND user_id=" + std::to_string(user_id));
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 
@@ -190,6 +193,7 @@ void TokenStore::revoke_user_token(long long user_id, long long token_id)
     sql_exec(db_, "UPDATE user_tokens SET status=0, token_plain=NULL WHERE id=" + std::to_string(token_id) +
                       " AND user_id=" + std::to_string(user_id) + " AND status=1");
     t.commit();
+    snapshot_invalidate();
 }
 
 bool TokenStore::delete_user_token(long long user_id, long long token_id)
@@ -209,6 +213,7 @@ bool TokenStore::delete_user_token(long long user_id, long long token_id)
     sql_exec(db_, "DELETE FROM user_tokens WHERE id=" + std::to_string(token_id) +
                       " AND user_id=" + std::to_string(user_id));
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 
@@ -260,6 +265,7 @@ bool TokenStore::set_token_channel_group(long long user_id, long long token_id, 
     sql_exec(db_, "UPDATE user_tokens SET channel_group_id=" + std::to_string(channel_group_id) +
                       " WHERE id=" + std::to_string(token_id) + " AND user_id=" + std::to_string(user_id));
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 

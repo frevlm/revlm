@@ -32,4 +32,7 @@ void snapshot_rebuild();
 // Called by management API write paths.
 void snapshot_invalidate();
 
+// Stops the background rebuild thread. Call during graceful shutdown.
+void snapshot_shutdown();
+
 } // namespace revlm

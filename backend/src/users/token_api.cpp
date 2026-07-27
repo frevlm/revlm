@@ -1,6 +1,8 @@
 #include "users/token_api.hpp"
 
+#include "auth/crypto.hpp"
 #include "channels/channel_groups.hpp"
+#include "store/snapshot.hpp"
 #include "users/tokens.hpp"
 #include "users/user_api.hpp"
 #include "util/json_convert.hpp"
@@ -41,6 +43,21 @@ std::optional<long long> authenticate_api_token(const ::httplib::Request &req, l
     if (!raw_token.has_value()) {
         return std::nullopt;
     }
+    // Snapshot-first fast path (lock-free read).
+    const std::string hash = token_hash(*raw_token);
+    if (auto snapshot = snapshot_acquire()) {
+        auto it = snapshot->tokens.find(hash);
+        if (it != snapshot->tokens.end()) {
+            const SnapshotToken &st = it->second;
+            user_id = st.user_id;
+            token_id = st.token_id;
+            if (st.group_id <= 0) {
+                return std::nullopt;
+            }
+            return st.group_id;
+        }
+    }
+    // DB fallback for newly-created tokens during the rebuild window.
     try {
         return UserStore::instance().tokens().resolve_token_channel_group_by_raw_token(*raw_token, user_id, token_id);
     } catch (const std::exception &) {

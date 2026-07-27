@@ -10,6 +10,7 @@
 #include "proxy/openai_chat.hpp"
 #include "proxy/openai_responses.hpp"
 #include "request/request.hpp"
+#include "store/snapshot.hpp"
 #include "users/users.hpp"
 #include "util/json.hpp"
 #include "util/json_util.hpp"
@@ -659,6 +660,21 @@ std::optional<ChannelGroup> Gateway::load_channel_group() const
     if (channel_group_id <= 0) {
         return std::nullopt;
     }
+    // Snapshot-first fast path (lock-free read, channels already filled).
+    if (auto snapshot = snapshot_acquire()) {
+        auto it = snapshot->groups.find(channel_group_id);
+        if (it != snapshot->groups.end()) {
+            ChannelGroup group = it->second;
+            if (group.id <= 0 || !group.status || group.channels.empty()) {
+                return std::nullopt;
+            }
+            if (group.pointer < 0 || group.pointer >= static_cast<int>(group.channels.size())) {
+                group.pointer = 0;
+            }
+            return group;
+        }
+    }
+    // DB fallback.
     ChannelGroup group = ChannelGroupStore::instance().get_channel_group_by_id(channel_group_id);
     if (group.id <= 0 || !group.status || group.channels.empty()) {
         return std::nullopt;

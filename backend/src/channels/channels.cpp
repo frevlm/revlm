@@ -1,6 +1,7 @@
 #include "channels/channels.hpp"
 
 #include "store/database.hpp"
+#include "store/snapshot.hpp"
 #include "revlm_entities-odb.hxx"
 
 #include <odb/database.hxx>
@@ -102,6 +103,7 @@ bool ChannelStore::create_channel(Channel &channel)
     ScopedTransaction t(db_);
     db_.persist(channel);
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 
@@ -115,6 +117,7 @@ bool ChannelStore::update_channel(Channel &channel)
     }
     db_.update(channel);
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 
@@ -129,6 +132,7 @@ bool ChannelStore::delete_channel(Channel &channel)
     sql_exec(db_, "DELETE FROM channel_group_members WHERE channel_id=" + std::to_string(channel.id));
     db_.erase(channel);
     t.commit();
+    snapshot_invalidate();
     return true;
 }
 

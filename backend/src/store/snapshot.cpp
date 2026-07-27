@@ -38,8 +38,9 @@ void do_rebuild()
     }
 
     // b) active tokens
-    auto token_rows =
-        sql_query_rows(db, "SELECT id, user_id, token_hash, channel_group_id FROM user_tokens WHERE status=1");
+    auto token_rows = sql_query_rows(db, "SELECT t.id, t.user_id, t.token_hash, t.channel_group_id "
+                                         "FROM user_tokens t JOIN users u ON u.id=t.user_id "
+                                         "WHERE t.status=1 AND u.status=1");
     for (const auto &row : token_rows) {
         SnapshotToken st;
         st.token_id = std::stoll(row[0].value_or("0"));
@@ -144,6 +145,14 @@ void snapshot_rebuild()
 void snapshot_invalidate()
 {
     g_invalidated.store(true, std::memory_order_release);
+}
+
+void snapshot_shutdown()
+{
+    g_stop.store(true);
+    if (g_thread.joinable()) {
+        g_thread.join();
+    }
 }
 
 } // namespace revlm
