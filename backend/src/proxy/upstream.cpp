@@ -9,6 +9,7 @@
 #include <cctype>
 #include <cerrno>
 #include <cstring>
+#include <memory>
 #include <netinet/in.h>
 #include <optional>
 #include <stdexcept>
@@ -24,6 +25,20 @@
 
 namespace revlm
 {
+namespace
+{
+
+// Per-thread CurlMultiPool — survives across requests for connection reuse.
+thread_local std::unique_ptr<CurlMultiPool> tls_pool;
+
+CurlMultiPool &pool()
+{
+    if (!tls_pool)
+        tls_pool = std::make_unique<CurlMultiPool>();
+    return *tls_pool;
+}
+
+} // namespace
 namespace
 {
 
@@ -344,8 +359,8 @@ UpstreamResponse default_upstream_http_transport(const UpstreamPreparedRequest &
     req.total_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
     req.dns_pin = std::move(dns_pin);
 
-    CurlMultiPool pool;
-    CurlResponse cres = pool.execute(req);
+    auto &curl_pool = pool();
+    CurlResponse cres = curl_pool.execute(req);
 
     UpstreamResponse response;
     response.status_code = cres.status_code;
@@ -372,8 +387,8 @@ UpstreamStreamResponse default_upstream_http_stream_transport(const UpstreamPrep
     req.total_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
     req.dns_pin = std::move(dns_pin);
 
-    CurlMultiPool pool;
-    auto result = pool.execute_stream(req);
+    CurlMultiPool &curl_pool = pool();
+    auto result = curl_pool.execute_stream(req);
 
     UpstreamStreamResponse response;
     response.request = prepared;

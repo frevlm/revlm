@@ -248,14 +248,12 @@ static net::awaitable<void> handle_connection(beast::tcp_stream stream,
         // Parse one request.  Keep-alive is not supported — close after
         // every response (matches the existing httplib server which sets
         // keep_alive_max_count=1).
-        // Parse headers first, then body separately.
-        // This is a stepping stone toward true sliding-window body forwarding:
-        // later the parser type will be changed to buffer_body, and async_read
-        // replaced with async_read_some in a loop so body chunks are forwarded
-        // to upstream as they arrive instead of accumulating in memory.
-        // TODO(beast-sliding-window): switch to request_parser<buffer_body> +
-        // async_read_some loop to forward body chunks without buffering.
-        beast::http::request_parser<beast::http::string_body> parser;
+        // buffer_body reads body in chunks via async_read_some instead of
+        // buffering the entire body inside the parser.  Chunks are accumulated
+        // into a string for dispatch compatibility.
+        // TODO: true sliding window requires interleaving curl sending with
+        // Beast body reading (async_read_some -> CurlRequest::read_body).
+        beast::http::request_parser<beast::http::buffer_body> parser;
         parser.body_limit(static_cast<std::uint64_t>(config().http_max_body_bytes));
         parser.header_limit(static_cast<std::uint32_t>(config().http_max_header_bytes));
 
@@ -264,14 +262,40 @@ static net::awaitable<void> handle_connection(beast::tcp_stream stream,
             std::cerr << "beast: header not fully parsed\n";
             co_return;
         }
-        // TODO(beast-sliding-window): this async_read buffers the ENTIRE body
-        // in memory (string_body).  Replace with request_parser<buffer_body> +
-        // async_read_some loop so body chunks are forwarded to upstream without
-        // accumulation.  Deferred to a follow-up PR; string_body is correct but
-        // not memory-efficient for 20MB+ bodies under 10000+ concurrent.
-        co_await beast::http::async_read(stream, buf, parser, net::use_awaitable);
 
-        auto req = parser.release();
+        // Accumulate body chunks via async_read_some loop.
+        std::string body_accum;
+        body_accum.reserve(config().http_max_body_bytes > 0 ?
+                               std::min(static_cast<size_t>(config().http_max_body_bytes), size_t{ 65536 }) :
+                               65536);
+
+        auto &body = parser.get().body();
+        while (!parser.is_done()) {
+            std::array<char, 65536> chunk{};
+            body.data = chunk.data();
+            body.size = sizeof(chunk);
+
+            beast::error_code ec;
+            co_await beast::http::async_read_some(stream, buf, parser, net::redirect_error(net::use_awaitable, ec));
+
+            if (ec == beast::http::error::need_buffer)
+                continue;
+
+            if (ec) {
+                std::cerr << "beast body read error: " << ec.message() << '\n';
+                co_return;
+            }
+
+            body_accum.append(chunk.data(), body.size);
+        }
+
+        // Build a string_body request from parsed headers + accumulated body.
+        beast::http::request<beast::http::string_body> req{ parser.get().method(), parser.get().target(),
+                                                            parser.get().version() };
+        for (auto const &field : parser.get())
+            req.set(field.name_string(), field.value());
+        req.body() = std::move(body_accum);
+        req.prepare_payload();
         const std::string request_id = resolve_request_id(req);
 
         const std::string_view path = target_path(req.target());
