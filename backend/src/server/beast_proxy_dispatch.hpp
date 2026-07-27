@@ -10,8 +10,7 @@
 #include "models/models.hpp"
 #include "proxy/gateway.hpp"
 #include "request/proxy_request.hpp"
-#include "store/snapshot.hpp"
-#include "users/tokens.hpp"
+#include "users/token_api.hpp"
 #include "users/users.hpp"
 #include "util/datetime.hpp"
 #include "util/json.hpp"
@@ -36,63 +35,28 @@ namespace revlm
 // Token extraction & auth
 // ---------------------------------------------------------------------------
 
-/// Extract the raw API token string from Beast request headers.
-/// Checks "Authorization: Bearer <token>" and "x-api-key: <token>".
-inline std::string beast_extract_api_token(const boost::beast::http::request<boost::beast::http::string_body> &req)
+/// Authenticate a Beast HTTP request by extracting the API token from
+/// Authorization / x-api-key headers and resolving it via snapshot + DB
+/// fallback.  Delegates to the string_view overloads of extract_api_token()
+/// and authenticate_api_token() in token_api.hpp.
+/// Returns channel_group_id on success; writes user_id and token_id.
+inline std::optional<long long>
+beast_authenticate_api_token(const boost::beast::http::request<boost::beast::http::string_body> &req,
+                             long long &user_id, long long &token_id)
 {
-    // Authorization: Bearer <token>
+    std::string_view auth_header;
+    std::string_view api_key_header;
     {
         auto it = req.find(boost::beast::http::field::authorization);
-        if (it != req.end()) {
-            const std::string authorization = trim_ascii(it->value());
-            const size_t sep = authorization.find(' ');
-            if (sep != std::string::npos) {
-                const std::string scheme = lowercase_ascii(trim_ascii(authorization.substr(0, sep)));
-                const std::string token = trim_ascii(authorization.substr(sep + 1));
-                if (scheme == "bearer" && !token.empty())
-                    return token;
-            }
-        }
+        if (it != req.end())
+            auth_header = { it->value().data(), it->value().size() };
     }
-
-    // x-api-key: <token>
     {
         auto it = req.find("x-api-key");
-        if (it != req.end()) {
-            const std::string api_key = trim_ascii(it->value());
-            if (!api_key.empty())
-                return api_key;
-        }
+        if (it != req.end())
+            api_key_header = { it->value().data(), it->value().size() };
     }
-
-    return {};
-}
-
-/// Authenticate a raw token string using snapshot + DB fallback.
-/// Returns channel_group_id on success; writes user_id and token_id.
-inline std::optional<long long> beast_authenticate_raw_token(std::string_view raw_token, long long &user_id,
-                                                             long long &token_id)
-{
-    // Snapshot-first fast path (lock-free read).
-    const std::string hash = token_hash(raw_token);
-    if (auto snapshot = snapshot_acquire()) {
-        auto it = snapshot->tokens.find(hash);
-        if (it != snapshot->tokens.end()) {
-            const SnapshotToken &st = it->second;
-            user_id = st.user_id;
-            token_id = st.token_id;
-            if (st.group_id <= 0)
-                return std::nullopt;
-            return st.group_id;
-        }
-    }
-
-    // DB fallback for newly-created tokens during the rebuild window.
-    try {
-        return UserStore::instance().tokens().resolve_token_channel_group_by_raw_token(raw_token, user_id, token_id);
-    } catch (const std::exception &) {
-        return std::nullopt;
-    }
+    return authenticate_api_token(auth_header, api_key_header, user_id, token_id);
 }
 
 // ---------------------------------------------------------------------------

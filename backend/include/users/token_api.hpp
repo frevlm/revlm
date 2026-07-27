@@ -13,7 +13,10 @@ namespace revlm
 {
 
 std::optional<std::string> extract_api_token(const httplib::Request &req);
+std::optional<std::string> extract_api_token(std::string_view auth_header, std::string_view api_key_header);
 std::optional<long long> authenticate_api_token(const httplib::Request &req, long long &user_id, long long &token_id);
+std::optional<long long> authenticate_api_token(std::string_view auth_header, std::string_view api_key_header,
+                                                long long &user_id, long long &token_id);
 
 json list_user_tokens_response(const User &user);
 json create_user_token_response(std::string_view raw_request, std::string_view body, std::string *set_cookie);

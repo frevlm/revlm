@@ -290,15 +290,8 @@ static net::awaitable<void> handle_connection(beast::tcp_stream stream,
             pr.request_id = request_id;
 
             // Auth
-            const std::string raw_token = beast_extract_api_token(req);
-            if (raw_token.empty()) {
-                BeastResponseSink sink(stream);
-                write_json_response(sink, 401, json{ { "error", json{ { "message", "Unauthorized" } } } });
-                log_access(req.method_string(), req.target(), 401, request_id);
-                co_return;
-            }
             long long user_id = 0, token_id = 0;
-            const auto channel_group_id = beast_authenticate_raw_token(raw_token, user_id, token_id);
+            const auto channel_group_id = beast_authenticate_api_token(req, user_id, token_id);
             if (!channel_group_id.has_value()) {
                 BeastResponseSink sink(stream);
                 write_json_response(sink, 401, json{ { "error", json{ { "message", "Unauthorized" } } } });

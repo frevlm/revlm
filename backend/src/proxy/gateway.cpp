@@ -420,6 +420,7 @@ constexpr int kDisconnectDrainTimeoutMs = 1500;
 
 struct SseEvent {
     std::string data;
+    std::string raw_event;
     bool done = false;
 };
 
@@ -456,10 +457,22 @@ public:
         }
         if (event_open_) {
             data_.clear();
+            raw_event_.clear();
             event_open_ = false;
         }
         line_.clear();
         return true;
+    }
+
+    std::string drain_partial()
+    {
+        std::string result = std::move(raw_event_);
+        raw_event_.clear();
+        if (event_open_) {
+            data_.clear();
+            event_open_ = false;
+        }
+        return result;
     }
 
 private:
@@ -469,8 +482,10 @@ private:
         line.swap(line_);
         if (line.empty()) {
             if (event_open_) {
+                raw_event_ += '\n';
                 const bool done = trim_ascii(data_) == "[DONE]";
-                out.push_back(SseEvent{ std::move(data_), done });
+                out.push_back(SseEvent{ std::move(data_), std::move(raw_event_), done });
+                raw_event_.clear();
                 data_.clear();
                 event_bytes_ = 0;
                 event_open_ = false;
@@ -484,6 +499,8 @@ private:
             ok_ = false;
             return false;
         }
+        raw_event_ += line;
+        raw_event_ += '\n';
         if (line[0] == ':') {
             return true;
         }
@@ -509,6 +526,7 @@ private:
     size_t event_bytes_ = 0;
     std::string line_;
     std::string data_;
+    std::string raw_event_;
     bool event_open_ = false;
     bool ok_ = true;
 };
@@ -1173,15 +1191,6 @@ GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size
 
     auto ingest = [&](std::string_view bytes) -> bool {
         out.pump.response_bytes += bytes.size();
-        if (!out.pump.client_disconnected) {
-            pending_send.append(bytes.data(), bytes.size());
-            if (pending_send.size() >= kFlushBytes) {
-                if (!write_to_client(pending_send)) {
-                    out.pump.client_disconnected = true;
-                }
-                pending_send.clear();
-            }
-        }
         events.clear();
         if (!reader.consume(bytes, events)) {
             out.pump.upstream_error = true;
@@ -1189,6 +1198,28 @@ GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size
         }
         for (const SseEvent &event : events) {
             handle_sse_event(event, started_at, out.pump, gateway);
+            if (!out.pump.client_disconnected && !event.raw_event.empty()) {
+                const bool has_usage = event.data.find("\"usage\"") != std::string::npos;
+                if (has_usage) {
+                    pending_send.append(event.raw_event);
+                    if (pending_send.size() >= kFlushBytes) {
+                        if (!write_to_client(pending_send)) {
+                            out.pump.client_disconnected = true;
+                        }
+                        pending_send.clear();
+                    }
+                } else {
+                    if (!pending_send.empty()) {
+                        if (!write_to_client(pending_send)) {
+                            out.pump.client_disconnected = true;
+                        }
+                        pending_send.clear();
+                    }
+                    if (!write_to_client(event.raw_event)) {
+                        out.pump.client_disconnected = true;
+                    }
+                }
+            }
         }
         return true;
     };
@@ -1239,6 +1270,12 @@ GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size
         }
     }
 
+    {
+        std::string leftover = reader.drain_partial();
+        if (!leftover.empty() && !out.pump.client_disconnected) {
+            pending_send.append(leftover);
+        }
+    }
     if (!reader.finish()) {
         out.pump.upstream_error = true;
     }

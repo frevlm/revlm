@@ -19,9 +19,9 @@
 namespace revlm
 {
 
-std::optional<std::string> extract_api_token(const ::httplib::Request &req)
+std::optional<std::string> extract_api_token(std::string_view auth_header, std::string_view api_key_header)
 {
-    const std::string authorization = trim_ascii(req.get_header_value("Authorization"));
+    const std::string authorization = trim_ascii(auth_header);
     const size_t sep = authorization.find(' ');
     if (sep != std::string::npos) {
         const std::string scheme = lowercase_ascii(trim_ascii(authorization.substr(0, sep)));
@@ -30,16 +30,22 @@ std::optional<std::string> extract_api_token(const ::httplib::Request &req)
             return token;
     }
 
-    const std::string api_key = trim_ascii(req.get_header_value("x-api-key"));
+    const std::string api_key = trim_ascii(api_key_header);
     if (!api_key.empty())
         return api_key;
 
     return std::nullopt;
 }
 
-std::optional<long long> authenticate_api_token(const ::httplib::Request &req, long long &user_id, long long &token_id)
+std::optional<std::string> extract_api_token(const ::httplib::Request &req)
 {
-    const auto raw_token = extract_api_token(req);
+    return extract_api_token(req.get_header_value("Authorization"), req.get_header_value("x-api-key"));
+}
+
+std::optional<long long> authenticate_api_token(std::string_view auth_header, std::string_view api_key_header,
+                                                long long &user_id, long long &token_id)
+{
+    const auto raw_token = extract_api_token(auth_header, api_key_header);
     if (!raw_token.has_value()) {
         return std::nullopt;
     }
@@ -63,6 +69,12 @@ std::optional<long long> authenticate_api_token(const ::httplib::Request &req, l
     } catch (const std::exception &) {
         return std::nullopt;
     }
+}
+
+std::optional<long long> authenticate_api_token(const ::httplib::Request &req, long long &user_id, long long &token_id)
+{
+    return authenticate_api_token(req.get_header_value("Authorization"), req.get_header_value("x-api-key"), user_id,
+                                  token_id);
 }
 
 json list_user_tokens_response(const User &user)
