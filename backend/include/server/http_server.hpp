@@ -23,6 +23,12 @@ public:
     int run(std::atomic_bool &running);
     void drain();
 
+    /// Shared draining flag for health-check responses (also used by BeastServer).
+    const std::shared_ptr<std::atomic_bool> &draining_ptr() const
+    {
+        return draining_;
+    }
+
 private:
     std::shared_ptr<std::atomic_bool> draining_;
     std::function<void()> stop_server_;

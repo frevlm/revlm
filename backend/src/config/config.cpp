@@ -76,6 +76,7 @@ Config load_config_from_env()
 
     assign_env(config.env, "REVLM_ENV");
     assign_env(config.addr, "REVLM_ADDR");
+    assign_env(config.beast_addr, "REVLM_BEAST_ADDR");
     assign_env(config.db_dsn, "REVLM_DB_DSN");
     assign_env(config.redis_addr, "REVLM_REDIS_ADDR");
     assign_env(config.redis_password, "REVLM_REDIS_PASSWORD");
@@ -118,6 +119,9 @@ void validate_config(Config &cfg)
 {
     if (cfg.addr.empty()) {
         throw std::invalid_argument("REVLM_ADDR must not be empty");
+    }
+    if (cfg.beast_addr.empty()) {
+        throw std::invalid_argument("REVLM_BEAST_ADDR must not be empty");
     }
     if (cfg.db_dsn.empty()) {
         throw std::invalid_argument("REVLM_DB_DSN must not be empty");

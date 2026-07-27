@@ -9,6 +9,7 @@ namespace revlm
 struct Config {
     std::string env = "dev";
     std::string addr = ":8080";
+    std::string beast_addr = "0.0.0.0:8080";
     std::string db_dsn;
     std::string redis_addr;
     std::string redis_password;
