@@ -71,8 +71,6 @@ public:
                                     const UpstreamTransport &transport, bool enforce_ssrf = true) const;
 };
 
-UpstreamPreparedRequest rewrite_for_unsupported_parameter_retry(const UpstreamPreparedRequest &prepared,
-                                                                const UpstreamResponse &response);
 std::string build_upstream_url(const ValidatedBaseUrl &base_url, std::string_view downstream_path,
                                std::string_view query);
 UpstreamResponse default_upstream_http_transport(const UpstreamPreparedRequest &prepared, int timeout_ms = 30000,

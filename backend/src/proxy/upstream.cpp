@@ -11,7 +11,6 @@
 #include <cstring>
 #include <netinet/in.h>
 #include <optional>
-#include <regex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -137,50 +136,6 @@ std::vector<UpstreamHeader> copy_headers(const std::vector<UpstreamHeader> &src)
     return out;
 }
 
-std::string unsupported_parameter_name(std::string_view body)
-{
-    static const std::regex pattern("unsupported parameter[^a-z0-9_]+([a-z0-9_]+)", std::regex_constants::icase);
-    std::smatch match;
-    const std::string haystack{ body };
-    if (std::regex_search(haystack, match, pattern) && match.size() >= 2) {
-        return lowercase_ascii(match[1].str());
-    }
-    return {};
-}
-
-bool rewrite_body_field(std::string_view body, std::string_view source_name, std::string_view dest_name,
-                        bool keep_destination, std::string &out)
-{
-    auto doc = json::parse(body);
-    if (!doc || !doc->is_object()) {
-        return false;
-    }
-    if (!doc->contains(source_name)) {
-        return false;
-    }
-    json value = static_cast<const json &>(*doc)[source_name];
-    doc->erase(source_name);
-    if (!keep_destination || !doc->contains(dest_name)) {
-        (*doc)[dest_name] = std::move(value);
-    }
-    out = doc->dump();
-    return true;
-}
-
-bool remove_body_field(std::string_view body, std::string_view name, std::string &out)
-{
-    auto doc = json::parse(body);
-    if (!doc || !doc->is_object()) {
-        return false;
-    }
-    if (!doc->contains(name)) {
-        return false;
-    }
-    doc->erase(name);
-    out = doc->dump();
-    return true;
-}
-
 } // namespace
 
 std::string build_upstream_url(const ValidatedBaseUrl &base_url, std::string_view downstream_path,
@@ -249,41 +204,6 @@ UpstreamPreparedRequest UpstreamExecutor::prepare(long long channel_id, Upstream
     return prepared;
 }
 
-UpstreamPreparedRequest rewrite_for_unsupported_parameter_retry(const UpstreamPreparedRequest &prepared,
-                                                                const UpstreamResponse &response)
-{
-    if (prepared.retried_unsupported_parameter) {
-        throw std::runtime_error("unsupported parameter rewrite already attempted");
-    }
-    if (response.status_code < 400 || response.status_code >= 500) {
-        throw std::runtime_error("unsupported parameter rewrite requires 4xx response");
-    }
-    const std::string parameter = unsupported_parameter_name(response.body);
-    if (parameter.empty()) {
-        throw std::runtime_error("unsupported parameter not found");
-    }
-
-    std::string body;
-    bool ok = false;
-    if (parameter == "max_output_tokens") {
-        ok = rewrite_body_field(prepared.body, "max_output_tokens", "max_tokens", true, body);
-    } else if (parameter == "max_tokens") {
-        ok = rewrite_body_field(prepared.body, "max_tokens", "max_output_tokens", false, body);
-    } else if (parameter == "max_completion_tokens") {
-        ok = rewrite_body_field(prepared.body, "max_completion_tokens", "max_tokens", true, body);
-    } else if (parameter == "stream_options") {
-        ok = remove_body_field(prepared.body, "stream_options", body);
-    }
-    if (!ok || body.empty() || body == prepared.body) {
-        throw std::runtime_error("unsupported parameter rewrite not applicable");
-    }
-
-    UpstreamPreparedRequest retried = prepared;
-    retried.body = std::move(body);
-    retried.retried_unsupported_parameter = true;
-    return retried;
-}
-
 UpstreamExecutionResult UpstreamExecutor::execute(long long channel_id, UpstreamRequest downstream,
                                                   const UpstreamTransport &transport, bool enforce_ssrf) const
 {
@@ -295,22 +215,6 @@ UpstreamExecutionResult UpstreamExecutor::execute(long long channel_id, Upstream
     UpstreamExecutionResult result;
     result.request = prepare(channel_id, std::move(downstream), false, enforce_ssrf);
     result.response = transport(result.request);
-    if (channel_type_is_anthropic(channel->type)) {
-        return result;
-    }
-    if (result.response.status_code < 400 || result.response.status_code >= 500) {
-        return result;
-    }
-    try {
-        UpstreamPreparedRequest retried = rewrite_for_unsupported_parameter_retry(result.request, result.response);
-        const UpstreamResponse retry_response = transport(retried);
-        if (retry_response.status_code >= 200 && retry_response.status_code < 300) {
-            result.request = std::move(retried);
-            result.response = retry_response;
-            result.rewrote_unsupported_parameter = true;
-        }
-    } catch (const std::runtime_error &) {
-    }
     return result;
 }
 

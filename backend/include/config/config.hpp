@@ -17,7 +17,7 @@ struct Config {
     int shutdown_grace_seconds = 60;
     int http_read_header_timeout_seconds = 5;
     int http_max_header_bytes = 1 << 20;
-    int http_max_body_bytes = 4 << 20;
+    long long http_max_body_bytes = 4 << 20;
     int proxy_upstream_timeout_seconds = 30;
     int db_max_open_conns = 64;
     int db_max_idle_conns = 32;

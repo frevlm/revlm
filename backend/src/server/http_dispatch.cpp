@@ -491,38 +491,28 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
                         write_json(res, 402, *quota_error);
                         return;
                     }
-                    pr.is_stream = parse_json_bool_field(req.body, "stream").value_or(false);
-                    if (pr.is_stream) {
-                        run_chat_completions_stream(res, std::move(pr), proxy_stream_commit_usage);
-                        return;
-                    }
-                    write_proxy_result(res, run_chat_completions(pr));
-                    finish_proxy_usage(res, pr);
+                    pr.is_stream = true;
+                    run_chat_completions_stream(res, std::move(pr), proxy_stream_commit_usage);
+                    return;
                 }));
     server.Post("/v1/messages", v1_http([](const ::httplib::Request &req, ResponseSink &res, ProxyRequest &pr) {
                     if (const auto quota_error = paygo_balance_gate(pr.auth.user_id); quota_error.has_value()) {
                         write_json(res, 402, *quota_error);
                         return;
                     }
-                    pr.is_stream = parse_json_bool_field(req.body, "stream").value_or(false);
-                    if (pr.is_stream) {
-                        run_messages_stream(res, std::move(pr), proxy_stream_commit_usage);
-                        return;
-                    }
-                    write_proxy_result(res, run_messages(pr));
-                    finish_proxy_usage(res, pr);
+                    pr.is_stream = true;
+                    run_messages_stream(res, std::move(pr), proxy_stream_commit_usage);
+                    return;
                 }));
     server.Post("/v1/responses", v1_http([](const ::httplib::Request &req, ResponseSink &res, ProxyRequest &pr) {
                     if (const auto quota_error = paygo_balance_gate(pr.auth.user_id); quota_error.has_value()) {
                         write_json(res, 402, *quota_error);
                         return;
                     }
-                    pr.is_stream = parse_json_bool_field(req.body, "stream").value_or(false);
+                    pr.is_stream = true;
                     ResponsesProxyExecuteOptions options;
-                    if (pr.is_stream) {
-                        options.stream_response = &res;
-                        options.on_usage = proxy_stream_commit_usage;
-                    }
+                    options.stream_response = &res;
+                    options.on_usage = proxy_stream_commit_usage;
                     auto result = handle_responses_proxy_request(pr, res, options);
                     if (!result.handled_stream) {
                         finish_proxy_usage(res, pr);
