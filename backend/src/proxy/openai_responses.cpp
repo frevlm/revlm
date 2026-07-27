@@ -100,7 +100,7 @@ bool OpenaiResponses::should_bill_non_stream() const
     return request.http.path != "/v1/responses/input_tokens";
 }
 
-bool OpenaiResponses::prepare(::httplib::Response &res)
+bool OpenaiResponses::prepare(ResponseSink &res)
 {
     if (request.http.method == "POST") {
         return true;
@@ -110,12 +110,12 @@ bool OpenaiResponses::prepare(::httplib::Response &res)
     return false;
 }
 
-ResponsesProxyResult handle_responses_proxy_request(ProxyRequest &pr, ::httplib::Response &res)
+ResponsesProxyResult handle_responses_proxy_request(ProxyRequest &pr, ResponseSink &res)
 {
     return handle_responses_proxy_request(pr, res, ResponsesProxyExecuteOptions{});
 }
 
-ResponsesProxyResult handle_responses_proxy_request(ProxyRequest &pr, ::httplib::Response &res,
+ResponsesProxyResult handle_responses_proxy_request(ProxyRequest &pr, ResponseSink &res,
                                                     const ResponsesProxyExecuteOptions &options)
 {
     return OpenaiResponses(pr).handle(res, options);

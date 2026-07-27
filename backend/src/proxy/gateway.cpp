@@ -39,10 +39,10 @@
 namespace revlm
 {
 
-void write_upstream(::httplib::Response &res, int status, std::string body, const std::vector<UpstreamHeader> &headers)
+void write_upstream(ResponseSink &res, int status, std::string body, const std::vector<UpstreamHeader> &headers)
 {
-    res.status = status;
-    res.reason = (status >= 200 && status < 300) ? "OK" : "Upstream";
+    res.set_status(status);
+    res.set_reason((status >= 200 && status < 300) ? "OK" : "Upstream");
     std::string content_type = "application/json; charset=utf-8";
     for (const UpstreamHeader &header : headers) {
         const std::string lower = lowercase_ascii(header.name);
@@ -93,7 +93,7 @@ json make_proxy_error(int status, json error_body)
     return make_proxy_result(status, serialize(error_body), { { "Content-Type", "application/json; charset=utf-8" } });
 }
 
-void write_proxy_result(::httplib::Response &res, const json &result)
+void write_proxy_result(ResponseSink &res, const json &result)
 {
     const int status = static_cast<int>(result["status"].as_int64().value_or(500));
     const std::string body = result["body"].as_string().value_or("");
@@ -122,7 +122,7 @@ void assign_request_correlation(ProxyRequest &pr, std::string_view response_id)
         pr.upstream.response_id = std::string{ response_id };
 }
 
-void set_stream_correlation_headers(::httplib::Response &res, std::string_view response_id)
+void set_stream_correlation_headers(ResponseSink &res, std::string_view response_id)
 {
     if (!response_id.empty())
         res.set_header("X-Response-Id", std::string{ response_id });
@@ -642,7 +642,7 @@ bool Gateway::should_bill_non_stream() const
     return true;
 }
 
-bool Gateway::prepare(::httplib::Response &res)
+bool Gateway::prepare(ResponseSink &res)
 {
     (void)res;
     return true;
@@ -732,7 +732,7 @@ json Gateway::run()
     return make_proxy_result(last_status, std::move(last_body), last_headers);
 }
 
-void Gateway::run_stream(::httplib::Response &res, const std::function<void(ProxyRequest &)> &on_usage)
+void Gateway::run_stream(ResponseSink &res, const std::function<void(ProxyRequest &)> &on_usage)
 {
     auto group = load_channel_group();
     if (!group.has_value()) {
@@ -879,7 +879,7 @@ json gateway_json_error_body(std::string_view message)
     return json{ { "error", json{ { "message", std::string{ message } } } } };
 }
 
-void write_proxy_upstream_response(::httplib::Response &res, const ProxyUpstreamResponse &upstream)
+void write_proxy_upstream_response(ResponseSink &res, const ProxyUpstreamResponse &upstream)
 {
     std::vector<UpstreamHeader> headers;
     if (!upstream.response_id.empty()) {
@@ -933,14 +933,14 @@ UpstreamSession open_gateway_upstream_stream_session(long long channel_id, Upstr
     return session;
 }
 
-void stream_gateway_session_to_httplib(::httplib::Response &res, UpstreamSession session, ProxyRequest usage,
+void stream_gateway_session_to_httplib(ResponseSink &res, UpstreamSession session, ProxyRequest usage,
                                        GatewayStreamKind stream_kind, double route_group_multiplier,
                                        std::function<void(ProxyRequest &usage, int first_token_latency_ms)> on_complete)
 {
     const int stream_status = session.head.status;
     const std::string content_type = session.head.content_type.empty() ? "text/event-stream; charset=utf-8" :
                                                                          session.head.content_type;
-    res.status = stream_status;
+    res.set_status(stream_status);
     res.set_header("Content-Type", content_type);
     if (!session.head.response_id.empty()) {
         res.set_header("X-Response-Id", session.head.response_id);
@@ -962,23 +962,17 @@ void stream_gateway_session_to_httplib(::httplib::Response &res, UpstreamSession
     shared->on_complete = std::move(on_complete);
 
     const int idle_timeout_ms = std::max(1000, config().proxy_upstream_timeout_seconds * 1000);
-    res.set_chunked_content_provider(content_type, [shared, idle_timeout_ms](size_t offset,
-                                                                             ::httplib::DataSink &sink) mutable {
-        if (offset != 0) {
-            return false;
-        }
+    res.set_chunked_provider(content_type, [shared, idle_timeout_ms](ChunkedSink &sink) mutable {
         auto stream_gateway = make_gateway(shared->stream_kind, shared->usage);
         const GatewayStreamResult gateway_result = pump_gateway_stream(
-            shared->session.stream.read,
-            [&sink](std::string_view data) { return sink.write(data.data(), data.size()); }, shared->session.head.body,
-            idle_timeout_ms, shared->session.stream.poll_fd, *stream_gateway);
+            shared->session.stream.read, [&sink](std::string_view data) { return sink.write(data); },
+            shared->session.head.body, idle_timeout_ms, shared->session.stream.poll_fd, *stream_gateway);
         const int session_status = shared->session.head.status;
         shared->session.close_stream();
         if (shared->on_complete && gateway_result.pump.saw_usage && session_status < 400) {
             shared->on_complete(shared->usage, gateway_result.pump.first_token_latency_ms);
         }
         sink.done();
-        return true;
     });
 }
 
@@ -1012,12 +1006,12 @@ bool stream_gateway_session_to_client(UpstreamSession &session, const ClientWrit
 
 } // namespace
 
-Gateway::HandleResult Gateway::handle(::httplib::Response &res)
+Gateway::HandleResult Gateway::handle(ResponseSink &res)
 {
     return handle(res, StreamOptions{});
 }
 
-Gateway::HandleResult Gateway::handle(::httplib::Response &res, const StreamOptions &options)
+Gateway::HandleResult Gateway::handle(ResponseSink &res, const StreamOptions &options)
 {
     if (!prepare(res)) {
         return {};
@@ -1342,12 +1336,12 @@ GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size
     return out;
 }
 
-void apply_upstream_gateway_stream(::httplib::Response &res, int status, const std::vector<UpstreamHeader> &headers,
+void apply_upstream_gateway_stream(ResponseSink &res, int status, const std::vector<UpstreamHeader> &headers,
                                    UpstreamStreamResponse upstream, ProxyRequest usage,
                                    std::function<std::unique_ptr<Gateway>(ProxyRequest &)> make_gateway_for_usage,
                                    std::function<void(ProxyRequest &usage, const GatewayStreamResult &)> on_complete)
 {
-    res.status = status;
+    res.set_status(status);
     std::string content_type = "text/event-stream; charset=utf-8";
     for (const UpstreamHeader &header : headers) {
         const std::string lower = lowercase_ascii(header.name);
@@ -1374,13 +1368,10 @@ void apply_upstream_gateway_stream(::httplib::Response &res, int status, const s
     shared->idle_timeout_ms = std::max(1000, config().proxy_upstream_timeout_seconds * 1000);
     shared->on_complete = std::move(on_complete);
 
-    res.set_chunked_content_provider(content_type, [shared](size_t offset, ::httplib::DataSink &sink) mutable {
-        if (offset != 0) {
-            return false;
-        }
+    res.set_chunked_provider(content_type, [shared](ChunkedSink &sink) mutable {
         try {
             GatewayStreamResult result;
-            auto tracked_write = [&sink](std::string_view data) { return sink.write(data.data(), data.size()); };
+            auto tracked_write = [&sink](std::string_view data) { return sink.write(data); };
             if (shared->gateway) {
                 result = pump_gateway_stream(shared->upstream.stream.read, tracked_write, shared->upstream.initial_body,
                                              shared->idle_timeout_ms, shared->upstream.stream.poll_fd,
@@ -1412,21 +1403,18 @@ void apply_upstream_gateway_stream(::httplib::Response &res, int status, const s
                 shared->on_complete(shared->usage, result);
             }
             sink.done();
-            return true;
         } catch (const std::exception &err) {
             std::cerr << "chunked stream provider failed: " << err.what() << std::endl;
             try {
                 sink.done();
             } catch (...) {
             }
-            return false;
         } catch (...) {
             std::cerr << "chunked stream provider failed: unknown" << std::endl;
             try {
                 sink.done();
             } catch (...) {
             }
-            return false;
         }
     });
 }

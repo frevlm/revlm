@@ -17,10 +17,10 @@
 namespace revlm
 {
 
-void write_json(::httplib::Response &res, int status, json body, std::string_view set_cookie)
+void write_json(ResponseSink &res, int status, json body, std::string_view set_cookie)
 {
-    res.status = status;
-    res.reason = (status >= 200 && status < 300) ? "OK" : "Error";
+    res.set_status(status);
+    res.set_reason((status >= 200 && status < 300) ? "OK" : "Error");
     if (!set_cookie.empty()) {
         res.set_header("Set-Cookie", std::string{ set_cookie });
     }

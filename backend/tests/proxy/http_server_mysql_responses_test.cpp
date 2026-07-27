@@ -8,6 +8,7 @@
 #include "proxy/openai_responses.hpp"
 #include "server/http_server.hpp"
 #include "users/tokens.hpp"
+#include "server/http/httplib_response_sink.hpp"
 #include "store/database.hpp"
 #include "store/schema.hpp"
 
@@ -327,7 +328,8 @@ int main()
         revlm::ResponsesProxyExecuteOptions options;
         options.client_fd = stream_pair[0];
         ::httplib::Response stream_http_res;
-        const auto stream_result = revlm::handle_responses_proxy_request(pr, stream_http_res, options);
+        HttplibResponseSink sink(stream_http_res);
+        const auto stream_result = revlm::handle_responses_proxy_request(pr, sink, options);
         ::close(stream_pair[0]);
         const std::string stream_response = recv_until_close(stream_pair[1]);
         ::close(stream_pair[1]);

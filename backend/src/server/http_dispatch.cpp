@@ -1,5 +1,6 @@
 #include "server/http_dispatch.hpp"
 #include "server/http_server.hpp"
+#include "server/http/httplib_response_sink.hpp"
 #include "auth/security.hpp"
 #include "users/users.hpp"
 #include "users/user_api.hpp"
@@ -190,7 +191,7 @@ ParsedRequest parsed_request_from_httplib(const ::httplib::Request &req)
     return parsed;
 }
 
-bool validate_parsed_request(const ParsedRequest &parsed, ::httplib::Response &res)
+bool validate_parsed_request(const ParsedRequest &parsed, ResponseSink &res)
 {
     if (parsed.header_bytes > static_cast<size_t>(config().http_max_header_bytes)) {
         write_json(res, 431, json("request header too large"));
@@ -227,7 +228,8 @@ make_http_handler(std::function<void(const ::httplib::Request &, ::httplib::Resp
     return [handler = std::move(handler)](const ::httplib::Request &req, ::httplib::Response &res) {
         RequestContext ctx = make_request_context(req);
         res.set_header("X-Request-Id", resolve_request_id(req));
-        if (!validate_parsed_request(ctx.parsed, res)) {
+        HttplibResponseSink sink(res);
+        if (!validate_parsed_request(ctx.parsed, sink)) {
             log_access(res, ctx.parsed.method, ctx.parsed.target, res.status);
             return;
         }
@@ -241,7 +243,8 @@ make_response_handler(std::function<json(const ::httplib::Request &, RequestCont
 {
     return make_http_handler(
         [handler = std::move(handler)](const ::httplib::Request &req, ::httplib::Response &res, RequestContext &ctx) {
-            write_json(res, 200, handler(req, ctx), ctx.set_cookie);
+            HttplibResponseSink sink(res);
+            write_json(sink, 200, handler(req, ctx), ctx.set_cookie);
         });
 }
 
@@ -320,7 +323,7 @@ void proxy_stream_commit_usage(ProxyRequest &pr)
     }
 }
 
-void finish_proxy_usage(::httplib::Response &res, ProxyRequest &pr)
+void finish_proxy_usage(ResponseSink &res, ProxyRequest &pr)
 {
     (void)res;
     if (pr.upstream.channel_id <= 0) {
@@ -343,7 +346,8 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
             ProxyRequest pr = make_request(req);
             res.set_header("X-Request-Id", resolve_request_id(req));
             if (pr.http.body.size() > static_cast<size_t>(config().http_max_body_bytes)) {
-                write_json(res, 413, json("payload too large"));
+                HttplibResponseSink sink(res);
+                write_json(sink, 413, json("payload too large"));
                 log_access(res, pr.http.method, pr.http.path, res.status);
                 return;
             }
@@ -351,14 +355,16 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
             long long token_id = 0;
             const auto channel_group_id = authenticate_api_token(req, user_id, token_id);
             if (!channel_group_id.has_value()) {
-                write_json(res, 401, json{ { "error", json{ { "message", "Unauthorized" } } } });
+                HttplibResponseSink sink(res);
+                write_json(sink, 401, json{ { "error", json{ { "message", "Unauthorized" } } } });
                 log_access(res, pr.http.method, pr.http.path, res.status);
                 return;
             }
             pr.auth.user_id = user_id;
             pr.auth.token_id = token_id;
             pr.auth.channel_group_id = *channel_group_id;
-            fn(req, res, pr);
+            HttplibResponseSink sink(res);
+            fn(req, sink, pr);
             log_access(res, pr.http.method, pr.http.path, res.status);
         };
     };
@@ -463,15 +469,14 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
     server.Post("/api/account/password", api([](const ::httplib::Request &req, RequestContext &ctx) {
                     return account_password_response(ctx.raw_request, req.body, &ctx.set_cookie);
                 }));
-    server.Get("/v1/models", v1_http([](const ::httplib::Request &, ::httplib::Response &res, ProxyRequest &pr) {
+    server.Get("/v1/models", v1_http([](const ::httplib::Request &, ResponseSink &res, ProxyRequest &pr) {
                    try {
                        write_json(res, 200, token_models_response(pr.auth.channel_group_id));
                    } catch (const std::exception &) {
                        write_json(res, 502, json("查询模型目录失败"));
                    }
                }));
-    server.Get("/v1/models/:model_id",
-               v1_http([](const ::httplib::Request &req, ::httplib::Response &res, ProxyRequest &pr) {
+    server.Get("/v1/models/:model_id", v1_http([](const ::httplib::Request &req, ResponseSink &res, ProxyRequest &pr) {
                    try {
                        bool not_found = false;
                        json body = token_model_retrieve_response(path_param_string(req, "model_id"),
@@ -481,8 +486,7 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
                        write_json(res, 502, json("查询模型目录失败"));
                    }
                }));
-    server.Post("/v1/chat/completions",
-                v1_http([](const ::httplib::Request &req, ::httplib::Response &res, ProxyRequest &pr) {
+    server.Post("/v1/chat/completions", v1_http([](const ::httplib::Request &req, ResponseSink &res, ProxyRequest &pr) {
                     if (const auto quota_error = paygo_balance_gate(pr.auth.user_id); quota_error.has_value()) {
                         write_json(res, 402, *quota_error);
                         return;
@@ -495,7 +499,7 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
                     write_proxy_result(res, run_chat_completions(pr));
                     finish_proxy_usage(res, pr);
                 }));
-    server.Post("/v1/messages", v1_http([](const ::httplib::Request &req, ::httplib::Response &res, ProxyRequest &pr) {
+    server.Post("/v1/messages", v1_http([](const ::httplib::Request &req, ResponseSink &res, ProxyRequest &pr) {
                     if (const auto quota_error = paygo_balance_gate(pr.auth.user_id); quota_error.has_value()) {
                         write_json(res, 402, *quota_error);
                         return;
@@ -508,7 +512,7 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
                     write_proxy_result(res, run_messages(pr));
                     finish_proxy_usage(res, pr);
                 }));
-    server.Post("/v1/responses", v1_http([](const ::httplib::Request &req, ::httplib::Response &res, ProxyRequest &pr) {
+    server.Post("/v1/responses", v1_http([](const ::httplib::Request &req, ResponseSink &res, ProxyRequest &pr) {
                     if (const auto quota_error = paygo_balance_gate(pr.auth.user_id); quota_error.has_value()) {
                         write_json(res, 402, *quota_error);
                         return;
@@ -525,7 +529,7 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
                     }
                 }));
     server.Post("/v1/responses/input_tokens",
-                v1_http([](const ::httplib::Request & /* req */, ::httplib::Response &res, ProxyRequest &pr) {
+                v1_http([](const ::httplib::Request & /* req */, ResponseSink &res, ProxyRequest &pr) {
                     if (const auto quota_error = paygo_balance_gate(pr.auth.user_id); quota_error.has_value()) {
                         write_json(res, 402, *quota_error);
                         return;

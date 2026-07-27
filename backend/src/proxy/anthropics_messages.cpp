@@ -55,7 +55,7 @@ json run_messages(ProxyRequest &pr)
     return AnthropicsMessages(pr).run();
 }
 
-void run_messages_stream(::httplib::Response &res, ProxyRequest pr, const std::function<void(ProxyRequest &)> &on_usage)
+void run_messages_stream(ResponseSink &res, ProxyRequest pr, const std::function<void(ProxyRequest &)> &on_usage)
 {
     AnthropicsMessages(pr).run_stream(res, on_usage);
 }

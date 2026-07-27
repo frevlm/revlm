@@ -49,7 +49,7 @@ json run_chat_completions(ProxyRequest &pr)
     return OpenaiChatCompletion(pr).run();
 }
 
-void run_chat_completions_stream(::httplib::Response &res, ProxyRequest pr,
+void run_chat_completions_stream(ResponseSink &res, ProxyRequest pr,
                                  const std::function<void(ProxyRequest &)> &on_usage)
 {
     OpenaiChatCompletion(pr).run_stream(res, on_usage);

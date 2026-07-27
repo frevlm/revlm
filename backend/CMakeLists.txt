@@ -6,7 +6,8 @@ add_library(revlm_core ${REVLM_CORE_SOURCES})
 add_library(revlm::core ALIAS revlm_core)
 
 target_include_directories(revlm_core PUBLIC
-  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>")
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>"
+  "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>")
 target_link_libraries(revlm_core PUBLIC
   Boost::json
   Boost::url
