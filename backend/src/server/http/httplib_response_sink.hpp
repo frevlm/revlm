@@ -3,6 +3,8 @@
 #include "server/response_sink.hpp"
 
 #include <httplib.h>
+#include <string>
+#include <string_view>
 
 /// Adapts ChunkedSink to httplib::DataSink.
 class HttplibChunkedSink : public ChunkedSink {
@@ -42,6 +44,16 @@ public:
     int status() const override
     {
         return res_.status;
+    }
+
+    void set_reason(std::string_view r) override
+    {
+        res_.reason = std::string{ r };
+    }
+
+    std::string reason() const override
+    {
+        return res_.reason;
     }
 
     void set_header(std::string_view name, std::string_view value) override

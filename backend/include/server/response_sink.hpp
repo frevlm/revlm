@@ -27,6 +27,9 @@ public:
     virtual void set_status(int code) = 0;
     virtual int status() const = 0;
 
+    virtual void set_reason(std::string_view reason) = 0;
+    virtual std::string reason() const = 0;
+
     virtual void set_header(std::string_view name, std::string_view value) = 0;
     virtual std::string get_header(std::string_view name) const = 0;
 

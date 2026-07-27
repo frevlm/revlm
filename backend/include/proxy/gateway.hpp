@@ -2,7 +2,6 @@
 
 #include <cstddef>
 #include <functional>
-#include <httplib.h>
 #include <memory>
 #include <optional>
 #include <string>
@@ -15,6 +14,7 @@
 #include "proxy/upstream.hpp"
 #include "request/proxy_request.hpp"
 #include "request/request.hpp"
+#include "server/response_sink.hpp"
 #include "util/json.hpp"
 
 namespace revlm
@@ -33,7 +33,7 @@ public:
     struct StreamOptions {
         int client_fd = -1;
         ClientWriter write_client;
-        ::httplib::Response *stream_response = nullptr;
+        ResponseSink *stream_response = nullptr;
         std::function<void(ProxyRequest &)> on_usage; // Path B only; Path C must be empty
     };
 
@@ -49,9 +49,9 @@ public:
     virtual ~Gateway() = default;
 
     json run();
-    void run_stream(::httplib::Response &res, const std::function<void(ProxyRequest &)> &on_usage);
-    HandleResult handle(::httplib::Response &res);
-    HandleResult handle(::httplib::Response &res, const StreamOptions &options);
+    void run_stream(ResponseSink &res, const std::function<void(ProxyRequest &)> &on_usage);
+    HandleResult handle(ResponseSink &res);
+    HandleResult handle(ResponseSink &res, const StreamOptions &options);
 
     virtual void finalize(json &json) = 0;
 
@@ -65,7 +65,7 @@ protected:
     virtual UpstreamRequest make_upstream(bool stream) const;
     virtual void fill_success_pricing(ProxyRequest &pr, const Channel &channel);
     virtual bool should_bill_non_stream() const;
-    virtual bool prepare(::httplib::Response &res);
+    virtual bool prepare(ResponseSink &res);
 
     std::optional<ChannelGroup> load_channel_group() const;
 };
@@ -100,9 +100,8 @@ struct ScheduledUpstreamStreamExecution {
 };
 
 // Proxy exit: pass upstream status/body/headers through to the client socket.
-void write_upstream(::httplib::Response &res, int status, std::string body,
-                    const std::vector<UpstreamHeader> &headers = {});
-void write_proxy_result(::httplib::Response &res, const json &result);
+void write_upstream(ResponseSink &res, int status, std::string body, const std::vector<UpstreamHeader> &headers = {});
+void write_proxy_result(ResponseSink &res, const json &result);
 
 json headers_to_json(const std::vector<UpstreamHeader> &headers);
 std::vector<UpstreamHeader> headers_from_json(const json &header_obj);
@@ -111,7 +110,7 @@ json make_proxy_error(int status, json error_body);
 
 std::string upstream_response_id_from_headers(const std::vector<UpstreamHeader> &headers);
 void assign_request_correlation(ProxyRequest &pr, std::string_view response_id);
-void set_stream_correlation_headers(::httplib::Response &res, std::string_view response_id);
+void set_stream_correlation_headers(ResponseSink &res, std::string_view response_id);
 std::vector<UpstreamHeader> merge_correlation_headers(const std::vector<UpstreamHeader> &upstream_headers,
                                                       std::string_view response_id);
 
@@ -154,7 +153,7 @@ GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size
                                         Gateway &gateway);
 
 void apply_upstream_gateway_stream(
-    ::httplib::Response &res, int status, const std::vector<UpstreamHeader> &headers, UpstreamStreamResponse upstream,
+    ResponseSink &res, int status, const std::vector<UpstreamHeader> &headers, UpstreamStreamResponse upstream,
     ProxyRequest usage, std::function<std::unique_ptr<Gateway>(ProxyRequest &)> make_gateway_for_usage,
     std::function<void(ProxyRequest &usage, const GatewayStreamResult &)> on_complete = {});
 

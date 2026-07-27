@@ -1,6 +1,6 @@
 #pragma once
 
-#include <httplib.h>
+#include "server/response_sink.hpp"
 
 #include <string_view>
 
@@ -26,11 +26,11 @@ protected:
     UpstreamRequest make_upstream(bool stream) const override;
     void fill_success_pricing(ProxyRequest &pr, const Channel &channel) override;
     bool should_bill_non_stream() const override;
-    bool prepare(::httplib::Response &res) override;
+    bool prepare(ResponseSink &res) override;
 };
 
-ResponsesProxyResult handle_responses_proxy_request(ProxyRequest &pr, ::httplib::Response &res);
-ResponsesProxyResult handle_responses_proxy_request(ProxyRequest &pr, ::httplib::Response &res,
+ResponsesProxyResult handle_responses_proxy_request(ProxyRequest &pr, ResponseSink &res);
+ResponsesProxyResult handle_responses_proxy_request(ProxyRequest &pr, ResponseSink &res,
                                                     const ResponsesProxyExecuteOptions &options);
 
 } // namespace revlm

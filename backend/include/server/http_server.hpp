@@ -7,13 +7,14 @@
 #include <string>
 #include <string_view>
 
+#include "server/response_sink.hpp"
 #include "util/json.hpp"
 
 namespace revlm
 {
 
 // HTTP exit only: serialize json onto the wire response.
-void write_json(::httplib::Response &res, int status, json body, std::string_view set_cookie = {});
+void write_json(ResponseSink &res, int status, json body, std::string_view set_cookie = {});
 
 class HttpServer {
 public:
