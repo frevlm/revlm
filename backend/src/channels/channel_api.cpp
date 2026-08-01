@@ -376,7 +376,7 @@ json channel_time_series_json(const ChannelTimeSeriesRequest &req)
                   { "points", std::move(points) } });
 }
 
-json channels_page_response(std::string_view raw_request, const ParsedRequest &parsed, std::string *set_cookie)
+json channels_page_response(const HttpRequestView &raw_request, const ParsedRequest &parsed, std::string *set_cookie)
 {
     json auth_error;
     if (!api_authenticated_admin(raw_request, auth_error, set_cookie)) {
@@ -395,7 +395,8 @@ json channels_page_response(std::string_view raw_request, const ParsedRequest &p
     }
 }
 
-json channel_time_series_response(std::string_view raw_request, const ParsedRequest &parsed, std::string *set_cookie)
+json channel_time_series_response(const HttpRequestView &raw_request, const ParsedRequest &parsed,
+                                  std::string *set_cookie)
 {
     json auth_error;
     if (!api_authenticated_admin(raw_request, auth_error, set_cookie)) {
@@ -416,7 +417,7 @@ json channel_time_series_response(std::string_view raw_request, const ParsedRequ
     }
 }
 
-json create_channel_response(std::string_view raw_request, std::string_view body, std::string *set_cookie)
+json create_channel_response(const HttpRequestView &raw_request, std::string_view body, std::string *set_cookie)
 {
     json error;
     if (!api_authenticated_admin(raw_request, error, set_cookie)) {
@@ -447,7 +448,7 @@ json create_channel_response(std::string_view raw_request, std::string_view body
     }
 }
 
-json update_channel_response(std::string_view raw_request, std::string_view body, std::string *set_cookie)
+json update_channel_response(const HttpRequestView &raw_request, std::string_view body, std::string *set_cookie)
 {
     json error;
     if (!api_authenticated_admin(raw_request, error, set_cookie)) {
@@ -494,7 +495,7 @@ std::optional<long long> path_channel_id_for_prefix_suffix(std::string_view path
     return parse_long_long(path.substr(prefix.size(), path.size() - prefix.size() - suffix.size()));
 }
 
-json delete_channel_response(std::string_view raw_request, long long channel_id, std::string *set_cookie)
+json delete_channel_response(const HttpRequestView &raw_request, long long channel_id, std::string *set_cookie)
 {
     json error;
     if (!api_authenticated_admin(raw_request, error, set_cookie)) {
@@ -513,7 +514,7 @@ json delete_channel_response(std::string_view raw_request, long long channel_id,
     }
 }
 
-bool channel_dispatch(std::string_view raw_request, std::string_view body, const ChannelParsedRequest &parsed,
+bool channel_dispatch(const HttpRequestView &raw_request, std::string_view body, const ChannelParsedRequest &parsed,
                       std::string *set_cookie, json &out)
 {
     ParsedRequest legacy{ parsed.method, parsed.path, parsed.target };
@@ -546,7 +547,7 @@ bool channel_dispatch(std::string_view raw_request, std::string_view body, const
     return false;
 }
 
-json channel_route(std::string_view raw_request, std::string_view body, const ChannelParsedRequest &parsed,
+json channel_route(const HttpRequestView &raw_request, std::string_view body, const ChannelParsedRequest &parsed,
                    std::string *set_cookie)
 {
     json out;

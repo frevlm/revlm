@@ -8,7 +8,7 @@
 #include "proxy/openai_responses.hpp"
 #include "server/http_server.hpp"
 #include "users/tokens.hpp"
-#include "server/http/httplib_response_sink.hpp"
+#include "streaming/httplib_response_sink.hpp"
 #include "store/database.hpp"
 #include "store/schema.hpp"
 
@@ -314,7 +314,6 @@ int main()
         }
         revlm::ProxyRequest pr;
         pr.http.headers.emplace_back("X-Request-Id", "2002005");
-        pr.id = 2002005;
         pr.auth.user_id = user_id;
         pr.auth.token_id = token_id;
         pr.upstream.channel_id = success_channel_id;

@@ -35,7 +35,7 @@ json admin_users_json(std::vector<User> users)
 
 } // namespace
 
-json admin_list_users_response(std::string_view raw_request, std::string *set_cookie)
+json admin_list_users_response(const HttpRequestView &raw_request, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_admin(raw_request, error, set_cookie);
@@ -50,7 +50,7 @@ json admin_list_users_response(std::string_view raw_request, std::string *set_co
     }
 }
 
-json admin_create_user_response(std::string_view raw_request, std::string_view body, std::string *set_cookie)
+json admin_create_user_response(const HttpRequestView &raw_request, std::string_view body, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_admin(raw_request, error, set_cookie);
@@ -85,7 +85,7 @@ json admin_create_user_response(std::string_view raw_request, std::string_view b
     }
 }
 
-json admin_update_user_response(long long user_id, std::string_view raw_request, std::string_view body,
+json admin_update_user_response(long long user_id, const HttpRequestView &raw_request, std::string_view body,
                                 std::string *set_cookie)
 {
     json error;
@@ -142,7 +142,7 @@ json admin_update_user_response(long long user_id, std::string_view raw_request,
     }
 }
 
-json admin_reset_user_password_response(long long user_id, std::string_view raw_request, std::string_view body,
+json admin_reset_user_password_response(long long user_id, const HttpRequestView &raw_request, std::string_view body,
                                         std::string *set_cookie)
 {
     json error;
@@ -176,7 +176,7 @@ json admin_reset_user_password_response(long long user_id, std::string_view raw_
     }
 }
 
-json admin_add_user_balance_response(long long user_id, std::string_view raw_request, std::string_view body,
+json admin_add_user_balance_response(long long user_id, const HttpRequestView &raw_request, std::string_view body,
                                      std::string *set_cookie)
 {
     json error;
@@ -211,7 +211,7 @@ json admin_add_user_balance_response(long long user_id, std::string_view raw_req
     }
 }
 
-json admin_delete_user_response(long long user_id, std::string_view raw_request, std::string *set_cookie)
+json admin_delete_user_response(long long user_id, const HttpRequestView &raw_request, std::string *set_cookie)
 {
     json error;
     const auto actor = api_authenticated_admin(raw_request, error, set_cookie);

@@ -222,7 +222,7 @@ json channel_group_delete_member_response(long long group_id, long long channel_
     }
 }
 
-json channel_groups_dispatch(std::string_view raw_request, std::string_view body,
+json channel_groups_dispatch(const HttpRequestView &raw_request, std::string_view body,
                              const ChannelGroupsParsedRequest &parsed_in, std::string *set_cookie)
 {
     ParsedRequest parsed{ parsed_in.method, parsed_in.path, parsed_in.target };
@@ -262,8 +262,8 @@ json channel_groups_dispatch(std::string_view raw_request, std::string_view body
 
 } // namespace
 
-json channel_groups_route(std::string_view raw_request, std::string_view body, const ChannelGroupsParsedRequest &parsed,
-                          std::string *set_cookie)
+json channel_groups_route(const HttpRequestView &raw_request, std::string_view body,
+                          const ChannelGroupsParsedRequest &parsed, std::string *set_cookie)
 {
     return channel_groups_dispatch(raw_request, body, parsed, set_cookie);
 }

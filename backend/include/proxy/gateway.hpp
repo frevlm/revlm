@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <functional>
 #include <memory>
@@ -14,7 +15,7 @@
 #include "proxy/upstream.hpp"
 #include "request/proxy_request.hpp"
 #include "request/request.hpp"
-#include "server/response_sink.hpp"
+#include "streaming/response_sink.hpp"
 #include "util/json.hpp"
 
 namespace revlm
@@ -50,6 +51,13 @@ public:
 
     json run();
     void run_stream(ResponseSink &res, const std::function<void(ProxyRequest &)> &on_usage);
+
+    /// Run the whole stream (upstream open + SSE pump) writing through a
+    /// raw client writer.  Intended to run on a pump-pool thread so no io
+    /// thread is held for the stream duration and the curl multi it drives
+    /// stays on one thread (connection reuse).
+    void run_stream_writer(const ClientWriter &write_client, const std::function<void(ProxyRequest &)> &on_usage);
+
     HandleResult handle(ResponseSink &res);
     HandleResult handle(ResponseSink &res, const StreamOptions &options);
 
@@ -125,7 +133,7 @@ std::string remove_json_field(std::string_view json, std::string_view field_name
 
 UpstreamRequest build_proxy_upstream_request(const ProxyRequest &pr, std::string_view path);
 
-ClientWriter client_writer_from_fd(int fd);
+ClientWriter client_writer_from_fd(int fd, std::shared_ptr<std::atomic_bool> response_started = {});
 
 bool is_sse_content_type(std::string_view content_type);
 
@@ -147,13 +155,12 @@ std::unique_ptr<Gateway> make_gateway(GatewayStreamKind kind, ProxyRequest &pr);
 
 void parse_billing_request_from_body(ProxyRequest &pr, GatewayStreamKind kind, std::string_view body);
 
-GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size_t)> &read_chunk,
+GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size_t, int idle_timeout_ms)> &read_chunk,
                                         const std::function<bool(std::string_view)> &write_to_client,
-                                        std::string_view initial_body, int idle_timeout_ms, int poll_fd,
-                                        Gateway &gateway);
+                                        std::string_view initial_body, int idle_timeout_ms, Gateway &gateway);
 
 void apply_upstream_gateway_stream(
-    ResponseSink &res, int status, const std::vector<UpstreamHeader> &headers, UpstreamStreamResponse upstream,
+    ResponseSink &res, int status, std::vector<UpstreamHeader> headers, UpstreamStreamResponse upstream,
     ProxyRequest usage, std::function<std::unique_ptr<Gateway>(ProxyRequest &)> make_gateway_for_usage,
     std::function<void(ProxyRequest &usage, const GatewayStreamResult &)> on_complete = {});
 

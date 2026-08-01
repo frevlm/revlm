@@ -104,18 +104,21 @@ void BatchWriter::flush_now()
 // ---------------------------------------------------------------------------
 // enqueue() — called from any io thread
 // ---------------------------------------------------------------------------
-void BatchWriter::enqueue(long long request_id, long long user_id, long long token_id, long long channel_id,
-                          int input_tokens, int output_tokens, int cache_read_tokens, int cache_create_1h,
-                          int cache_create_5m, double tier_mult, std::string service_tier, double channel_mult,
-                          int status_code, int latency_ms, int first_token_latency_ms, bool is_stream,
-                          std::string model_name, std::string error_class, std::string error_message, int64_t usd_micro,
-                          std::string datetime)
+void BatchWriter::enqueue(long long user_id, long long token_id, long long channel_id, std::string request_id_str,
+                          std::string response_id, std::string endpoint, std::string method, int input_tokens,
+                          int output_tokens, int cache_read_tokens, int cache_create_1h, int cache_create_5m,
+                          double tier_mult, std::string service_tier, double channel_mult, int status_code,
+                          int latency_ms, int first_token_latency_ms, bool is_stream, std::string model_name,
+                          std::string error_class, std::string error_message, int64_t usd_micro, std::string datetime)
 {
     DebitRecord rec;
-    rec.request_id = request_id;
     rec.user_id = user_id;
     rec.token_id = token_id;
     rec.channel_id = channel_id;
+    rec.request_id_str = std::move(request_id_str);
+    rec.response_id = std::move(response_id);
+    rec.endpoint = std::move(endpoint);
+    rec.method = std::move(method);
     rec.input_tokens = input_tokens;
     rec.output_tokens = output_tokens;
     rec.cache_read_tokens = cache_read_tokens;
@@ -139,8 +142,8 @@ void BatchWriter::enqueue(long long request_id, long long user_id, long long tok
         active_.pop(); // drop oldest
         std::fprintf(stderr,
                      "BatchWriter: queue full (%d), dropped oldest record "
-                     "(user=%lld, request=%lld)\n",
-                     kMaxQueueSize, static_cast<long long>(rec.user_id), static_cast<long long>(rec.request_id));
+                     "(user=%lld)\n",
+                     kMaxQueueSize, static_cast<long long>(rec.user_id));
     }
     active_.push(std::move(rec));
 }
@@ -239,7 +242,8 @@ int BatchWriter::do_flush()
 
     // b) INSERT INTO requests — multi-row
     if (!batch.empty()) {
-        sql += "INSERT INTO requests (time, user_id, token_id, input_tokens, output_tokens, "
+        sql += "INSERT INTO requests (time, request_id, response_id, endpoint, method, user_id, token_id, "
+               "input_tokens, output_tokens, "
                "cache_read_tokens, cache_creation_1h_tokens, cache_creation_5m_tokens, "
                "tier_multiplier, service_tier, channel_multiplier, channel_id, "
                "status_code, latency_ms, first_token_latency_ms, "
@@ -253,6 +257,10 @@ int BatchWriter::do_flush()
 
             sql += "(";
             sql += sql_quote(db, rec.datetime); // time
+            sql += ", " + (rec.request_id_str.empty() ? std::string("NULL") : sql_quote(db, rec.request_id_str));
+            sql += ", " + (rec.response_id.empty() ? std::string("NULL") : sql_quote(db, rec.response_id));
+            sql += ", " + (rec.endpoint.empty() ? std::string("NULL") : sql_quote(db, rec.endpoint));
+            sql += ", " + (rec.method.empty() ? std::string("NULL") : sql_quote(db, rec.method));
             sql += ", " + std::to_string(rec.user_id); // user_id
             sql += ", " + std::to_string(rec.token_id); // token_id
             sql += ", " + std::to_string(rec.input_tokens); // input_tokens
@@ -303,15 +311,23 @@ int BatchWriter::do_flush()
             sql += ", " + std::to_string(agg.first_token_latency_sum);
             sql += ")";
         }
-        sql += " ON DUPLICATE KEY UPDATE "
-               "requests = requests + VALUES(requests), "
-               "input_tokens = input_tokens + VALUES(input_tokens), "
-               "output_tokens = output_tokens + VALUES(output_tokens), "
-               "cache_read_tokens = cache_read_tokens + VALUES(cache_read_tokens), "
-               "cache_creation_tokens = cache_creation_tokens + VALUES(cache_creation_tokens), "
-               "tokens = tokens + VALUES(tokens), "
-               "usd = usd + VALUES(usd), "
-               "first_token_latency_sum = first_token_latency_sum + VALUES(first_token_latency_sum);\n";
+        // Row-alias form (MySQL >= 8.0.19): VALUES() is deprecated since
+        // 8.0.20 and removed in 9.x.  Each (user,token,date) key appears at
+        // most once per statement (pre-merged above), so `new.*` refers to
+        // that single row.
+        // NOTE: with the row alias the assignment targets must be
+        // table-qualified — an unqualified name is ambiguous against the
+        // INSERT field list (MySQL 1052, verified on 9.7).
+        sql +=
+            " AS new ON DUPLICATE KEY UPDATE "
+            "request_totals.requests = request_totals.requests + new.requests, "
+            "request_totals.input_tokens = request_totals.input_tokens + new.input_tokens, "
+            "request_totals.output_tokens = request_totals.output_tokens + new.output_tokens, "
+            "request_totals.cache_read_tokens = request_totals.cache_read_tokens + new.cache_read_tokens, "
+            "request_totals.cache_creation_tokens = request_totals.cache_creation_tokens + new.cache_creation_tokens, "
+            "request_totals.tokens = request_totals.tokens + new.tokens, "
+            "request_totals.usd = request_totals.usd + new.usd, "
+            "request_totals.first_token_latency_sum = request_totals.first_token_latency_sum + new.first_token_latency_sum;\n";
     }
 
     // ---- Execute with retry ----------------------------------------------

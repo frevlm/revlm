@@ -15,11 +15,13 @@ void OpenaiResponses::finalize(json &json_obj)
 {
     // Official: non-stream usage at root; SSE nests under response.usage.
     // cached_tokens is a subset of input_tokens; cache_write_tokens is optional nested.
+    // Token fields are present on the usage event, but guard against sparse
+    // usage objects (never crash the pump).
     const json &root = json_obj;
     const json response = root["response"];
     const json usage = (response.is_object() && response["usage"].is_object()) ? response["usage"] : root["usage"];
-    const long long input_tokens = usage["input_tokens"].as_int64().value();
-    const long long output_tokens = usage["output_tokens"].as_int64().value();
+    const long long input_tokens = usage["input_tokens"].as_int64().value_or(0);
+    const long long output_tokens = usage["output_tokens"].as_int64().value_or(0);
     const json details = usage["input_tokens_details"];
     const long long cached_tokens = details.is_object() ? details["cached_tokens"].as_int64().value_or(0) : 0;
     const long long cache_write_tokens = details.is_object() ? details["cache_write_tokens"].as_int64().value_or(0) : 0;
@@ -32,8 +34,12 @@ void OpenaiResponses::finalize(json &json_obj)
     if (const auto tier = meta["service_tier"].as_string(); tier.has_value()) {
         request.upstream.service_tier = *tier;
     }
-    if (const auto model = meta["model"].as_string(); model.has_value() && !model->empty()) {
-        request.upstream.model_name = *model;
+    // Billing prefers the client-requested model (set before finalize); the
+    // upstream response model is only a fallback since upstreams may rewrite it.
+    if (request.upstream.model_name.empty()) {
+        if (const auto model = meta["model"].as_string(); model.has_value() && !model->empty()) {
+            request.upstream.model_name = *model;
+        }
     }
 }
 
@@ -77,6 +83,8 @@ UpstreamRequest OpenaiResponses::make_upstream(bool stream) const
     downstream.method = request.http.method;
     downstream.path = request.http.path;
     downstream.body = request.http.body;
+    downstream.content_length = request.http.content_length;
+    downstream.body_source = request.http.body_source;
     downstream.headers = {
         { "Content-Type", "application/json" },
         { "Accept", stream ? "text/event-stream" : "application/json" },

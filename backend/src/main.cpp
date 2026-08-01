@@ -7,7 +7,7 @@
 #include <thread>
 
 #include "config/config.hpp"
-#include "server/beast_server.hpp"
+#include "streaming/beast_server.hpp"
 #include "server/http_server.hpp"
 #include "store/batch_writer.hpp"
 #include "store/database.hpp"

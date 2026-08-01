@@ -26,7 +26,8 @@ int main()
 
     const std::string ready = revlm::handle_http_request("GET /readyz HTTP/1.1\r\nHost: test\r\n\r\n", false);
     if (expect_contains(ready, "HTTP/1.1 200 OK", "readyz should be ready before drain") != 0 ||
-        expect_contains(ready, "X-Request-Id: 1001", "response should include request id") != 0) {
+        expect_contains(ready, "X-Request-Id: req_",
+                        "response should include a server-generated request id when client omits one") != 0) {
         return 1;
     }
 
@@ -54,6 +55,8 @@ int main()
         return 1;
     }
 
+    // Configured positive limit: oversized bodies are rejected with 413.
+    // (Default 0 = unlimited — the proxy sets no cap, see design doc §10.)
     config.http_max_body_bytes = 3;
     revlm::reset_config_for_test(config);
     const std::string too_large = revlm::handle_http_request(
@@ -71,7 +74,7 @@ int main()
     }
 
     config.http_max_header_bytes = 1 << 20;
-    config.http_max_body_bytes = 4 << 20;
+    config.http_max_body_bytes = 0; // default: no proxy-side limit
     revlm::reset_config_for_test(config);
 
     const std::string spa = revlm::handle_http_request("GET /admin/users HTTP/1.1\r\nHost: test\r\n\r\n", false);

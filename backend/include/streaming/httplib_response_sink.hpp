@@ -1,6 +1,6 @@
 #pragma once
 
-#include "server/response_sink.hpp"
+#include "streaming/response_sink.hpp"
 
 #include <httplib.h>
 #include <string>

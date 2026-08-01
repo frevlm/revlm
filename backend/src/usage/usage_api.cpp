@@ -348,7 +348,7 @@ json usage_time_series(const std::vector<Request> &rows, const std::string &tz, 
     return points;
 }
 
-json user_models_detail_response(std::string_view raw_request, std::string *set_cookie)
+json user_models_detail_response(const HttpRequestView &raw_request, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_user(raw_request, error, set_cookie);
@@ -374,7 +374,7 @@ json user_models_detail_response(std::string_view raw_request, std::string *set_
     return json({ { "success", true }, { "data", std::move(models_json) } });
 }
 
-json dashboard_response(std::string_view raw_request, std::string_view target, std::string *set_cookie)
+json dashboard_response(const HttpRequestView &raw_request, std::string_view target, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_user(raw_request, error, set_cookie);
@@ -421,7 +421,7 @@ json dashboard_response(std::string_view raw_request, std::string_view target, s
     }
 }
 
-json usage_windows_response(std::string_view raw_request, std::string_view target, std::string *set_cookie)
+json usage_windows_response(const HttpRequestView &raw_request, std::string_view target, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_user(raw_request, error, set_cookie);
@@ -449,7 +449,7 @@ json usage_windows_response(std::string_view raw_request, std::string_view targe
     }
 }
 
-json requests_response(std::string_view raw_request, std::string_view target, std::string *set_cookie)
+json requests_response(const HttpRequestView &raw_request, std::string_view target, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_user(raw_request, error, set_cookie);
@@ -510,7 +510,7 @@ json requests_response(std::string_view raw_request, std::string_view target, st
     }
 }
 
-json usage_timeseries_response(std::string_view raw_request, std::string_view target, std::string *set_cookie)
+json usage_timeseries_response(const HttpRequestView &raw_request, std::string_view target, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_user(raw_request, error, set_cookie);
@@ -547,7 +547,7 @@ json usage_timeseries_response(std::string_view raw_request, std::string_view ta
     }
 }
 
-json usage_event_detail_response(std::string_view raw_request, long long event_id, std::string *set_cookie)
+json usage_event_detail_response(const HttpRequestView &raw_request, long long event_id, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_user(raw_request, error, set_cookie);

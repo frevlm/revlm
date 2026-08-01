@@ -14,7 +14,6 @@ namespace revlm
 
 void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::atomic_bool> &draining);
 
-std::string inject_request_metadata(std::string_view request, std::string_view client_ip);
 ProxyRequest make_request(const ::httplib::Request &req);
 
 } // namespace revlm

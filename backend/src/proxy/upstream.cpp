@@ -2,6 +2,7 @@
 
 #include "auth/security.hpp"
 #include "channels/channels.hpp"
+#include "config/config.hpp"
 #include "util/json.hpp"
 
 #include <algorithm>
@@ -20,7 +21,7 @@
 #include <vector>
 #include "util/strings.hpp"
 
-#include "net/curl_multi_pool.hpp"
+#include "streaming/curl_multi_pool.hpp"
 #include <netdb.h>
 
 namespace revlm
@@ -170,7 +171,7 @@ std::string build_upstream_url(const ValidatedBaseUrl &base_url, std::string_vie
 }
 
 UpstreamPreparedRequest UpstreamExecutor::prepare(long long channel_id, UpstreamRequest downstream,
-                                                  bool retried_unsupported_parameter, bool enforce_ssrf) const
+                                                  bool enforce_ssrf) const
 {
     const auto channel = ChannelStore::instance().find_channel(channel_id);
     if (!channel.has_value() || !channel->status) {
@@ -184,8 +185,9 @@ UpstreamPreparedRequest UpstreamExecutor::prepare(long long channel_id, Upstream
         enforce_upstream_ssrf_guard(prepared.base_url);
     }
     prepared.method = downstream.method.empty() ? "POST" : std::move(downstream.method);
-    prepared.retried_unsupported_parameter = retried_unsupported_parameter;
     prepared.body = std::move(downstream.body);
+    prepared.content_length = downstream.content_length;
+    prepared.body_source = std::move(downstream.body_source);
 
     if (channel->api_key.empty()) {
         throw std::runtime_error("channel api key not found");
@@ -228,7 +230,7 @@ UpstreamExecutionResult UpstreamExecutor::execute(long long channel_id, Upstream
     }
 
     UpstreamExecutionResult result;
-    result.request = prepare(channel_id, std::move(downstream), false, enforce_ssrf);
+    result.request = prepare(channel_id, std::move(downstream), enforce_ssrf);
     result.response = transport(result.request);
     return result;
 }
@@ -341,22 +343,63 @@ UpstreamExecutionResult execute_with_default_transport(const UpstreamExecutor &e
                             make_default_upstream_transport(timeout_ms, allow_private_target), !allow_private_target);
 }
 
-UpstreamResponse default_upstream_http_transport(const UpstreamPreparedRequest &prepared, int timeout_ms,
-                                                 bool allow_private_target)
+namespace
 {
-    const int effective_timeout_ms = timeout_ms > 0 ? timeout_ms : k_default_upstream_timeout_ms;
-    if (!allow_private_target) {
-        enforce_upstream_ssrf_guard(prepared.base_url);
-    }
-    std::string dns_pin = assert_resolved_addresses_allowed(prepared.base_url, allow_private_target);
+
+/// Build a CurlRequest from a prepared upstream request, wiring the
+/// four-segment timeouts from config.  `header_timeout_ms` (legacy
+/// timeout_ms parameter) overrides the response-header timeout when > 0.
+CurlRequest make_curl_request(const UpstreamPreparedRequest &prepared, int header_timeout_ms)
+{
+    const Config &cfg = config();
 
     CurlRequest req;
     req.url = prepared.url;
     req.method = prepared.method;
     req.headers = to_curl_headers(prepared.headers);
-    req.initial_body_chunk = prepared.body;
-    req.connect_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
-    req.total_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
+    req.body_source = prepared.body_source;
+    req.content_length = prepared.content_length;
+    if (prepared.body_source) {
+        req.initial_body_chunk.clear(); // body flows via the source
+    } else {
+        req.initial_body_chunk = prepared.body;
+    }
+
+    // Upload rate limiting (design doc: two-pool-bandwidth-allocation.md).
+    // Classification is a join-time pure function of Content-Length; the
+    // flow is pre-warmed at cap = P so curl's limit window is never cold.
+    // Disabled unless REVLM_PROXY_UPLOAD_RATE_LIMIT_KBPS > 0.
+    const bool has_upload = prepared.body_source || !prepared.body.empty() || prepared.content_length > 0;
+    if (cfg.proxy_upload_rate_limit_kbps > 0 && has_upload) {
+        req.rate_flow = upload_rate_limiter().join(prepared.content_length);
+    }
+
+    // Four-segment timeouts (design doc §8):
+    //   connect  — TCP/TLS handshake
+    //   upload   — LOW_SPEED stall detection (progress, not wall clock)
+    //   header   — first response bytes
+    //   total    — optional hard cap; 0 = disabled
+    req.connect_timeout_s = std::max(1L, static_cast<long>(cfg.proxy_upstream_connect_timeout_seconds));
+    req.upload_low_speed_bytes = static_cast<long>(cfg.proxy_upstream_upload_stall_low_speed_kbps) * 1024;
+    req.upload_low_speed_time = std::max(1L, static_cast<long>(cfg.proxy_upstream_upload_stall_seconds));
+    req.header_timeout_s = header_timeout_ms > 0 ?
+                               std::max(1L, static_cast<long>(header_timeout_ms / 1000)) :
+                               std::max(1L, static_cast<long>(cfg.proxy_upstream_header_timeout_seconds));
+    req.total_timeout_s = std::max(0L, static_cast<long>(cfg.proxy_upstream_timeout_seconds));
+    return req;
+}
+
+} // namespace
+
+UpstreamResponse default_upstream_http_transport(const UpstreamPreparedRequest &prepared, int timeout_ms,
+                                                 bool allow_private_target)
+{
+    if (!allow_private_target) {
+        enforce_upstream_ssrf_guard(prepared.base_url);
+    }
+    std::string dns_pin = assert_resolved_addresses_allowed(prepared.base_url, allow_private_target);
+
+    CurlRequest req = make_curl_request(prepared, timeout_ms);
     req.dns_pin = std::move(dns_pin);
 
     auto &curl_pool = pool();
@@ -372,32 +415,26 @@ UpstreamResponse default_upstream_http_transport(const UpstreamPreparedRequest &
 UpstreamStreamResponse default_upstream_http_stream_transport(const UpstreamPreparedRequest &prepared, int timeout_ms,
                                                               bool allow_private_target)
 {
-    const int effective_timeout_ms = timeout_ms > 0 ? timeout_ms : k_default_upstream_timeout_ms;
     if (!allow_private_target) {
         enforce_upstream_ssrf_guard(prepared.base_url);
     }
     std::string dns_pin = assert_resolved_addresses_allowed(prepared.base_url, allow_private_target);
 
-    CurlRequest req;
-    req.url = prepared.url;
-    req.method = prepared.method;
-    req.headers = to_curl_headers(prepared.headers);
-    req.initial_body_chunk = prepared.body;
-    req.connect_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
-    req.total_timeout_s = std::max(1L, static_cast<long>(effective_timeout_ms / 1000));
+    CurlRequest req = make_curl_request(prepared, timeout_ms);
     req.dns_pin = std::move(dns_pin);
 
     CurlMultiPool &curl_pool = pool();
     auto result = curl_pool.execute_stream(req);
 
     UpstreamStreamResponse response;
-    response.request = prepared;
+    response.channel_id = prepared.channel_id;
     response.status_code = result.status_code;
     response.headers = from_curl_headers(result.headers);
     response.initial_body = std::move(result.initial_body);
-    response.stream.read = std::move(result.stream_read);
+    response.stream.read = [result](char *out, size_t size, int idle_timeout_ms) -> ssize_t {
+        return result.stream_read(out, size, idle_timeout_ms);
+    };
     response.stream.close = std::move(result.stream_close);
-    response.stream.poll_fd = result.poll_fd;
     return response;
 }
 

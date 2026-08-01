@@ -9,7 +9,7 @@
 
 ### MySQL
 
-任何 8.x 兼容实例。需要的 schema 由应用启动时自动迁移; 你只需准备好库 + 账号:
+任何 8.0.19+ 实例（批量计费使用 `VALUES ... AS new` 行别名语法，8.0.19 起支持；8.0.20 起弃用旧 `VALUES()`，9.x 已移除）。需要的 schema 由应用启动时自动迁移; 你只需准备好库 + 账号:
 
 ```sql
 CREATE DATABASE revlm CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;

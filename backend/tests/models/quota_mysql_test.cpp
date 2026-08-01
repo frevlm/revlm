@@ -69,7 +69,6 @@ int main()
         broke_request.upstream.model_name = model.name;
         broke_request.usage.input_tokens = 100'000;
         broke_request.usage.output_tokens = 50'000;
-        broke_request.id = 700000;
         broke_request.auth.user_id = broke_user_id;
         broke_request.auth.token_id = 1;
         broke_request.upstream.channel_id = 1;
@@ -82,7 +81,6 @@ int main()
         funded_request.upstream.model_name = model.name;
         funded_request.usage.input_tokens = 100'000;
         funded_request.usage.output_tokens = 50'000;
-        funded_request.id = 700001;
         funded_request.auth.user_id = funded_user_id;
         funded_request.auth.token_id = token_id;
         funded_request.http.path = "/v1/responses";

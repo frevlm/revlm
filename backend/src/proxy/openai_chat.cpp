@@ -9,9 +9,11 @@ void OpenaiChatCompletion::finalize(json &json_obj)
 {
     // Official CompletionUsage: prompt_tokens includes cached_tokens (subset);
     // prompt_tokens_details may omit fields — treat nested as optional.
+    // Token fields themselves are present on the final usage chunk, but guard
+    // against providers that send a sparse usage object (never crash the pump).
     const json usage = json_obj["usage"];
-    const long long prompt_tokens = usage["prompt_tokens"].as_int64().value();
-    const long long completion_tokens = usage["completion_tokens"].as_int64().value();
+    const long long prompt_tokens = usage["prompt_tokens"].as_int64().value_or(0);
+    const long long completion_tokens = usage["completion_tokens"].as_int64().value_or(0);
     const json details = usage["prompt_tokens_details"];
     const long long cached_tokens = details.is_object() ? details["cached_tokens"].as_int64().value_or(0) : 0;
     const long long cache_write_tokens = details.is_object() ? details["cache_write_tokens"].as_int64().value_or(0) : 0;
@@ -23,8 +25,12 @@ void OpenaiChatCompletion::finalize(json &json_obj)
     if (const auto tier = json_obj["service_tier"].as_string(); tier.has_value()) {
         request.upstream.service_tier = *tier;
     }
-    if (const auto model = json_obj["model"].as_string(); model.has_value() && !model->empty()) {
-        request.upstream.model_name = *model;
+    // Billing prefers the client-requested model (set before finalize); the
+    // upstream response model is only a fallback since upstreams may rewrite it.
+    if (request.upstream.model_name.empty()) {
+        if (const auto model = json_obj["model"].as_string(); model.has_value() && !model->empty()) {
+            request.upstream.model_name = *model;
+        }
     }
 }
 

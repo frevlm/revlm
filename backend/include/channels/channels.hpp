@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include "auth/session.hpp"
 #include "models/models.hpp"
 #include "util/json.hpp"
 
@@ -65,7 +66,7 @@ struct ChannelParsedRequest {
     std::string_view target;
 };
 
-json channel_route(std::string_view raw_request, std::string_view body, const ChannelParsedRequest &parsed,
+json channel_route(const HttpRequestView &raw_request, std::string_view body, const ChannelParsedRequest &parsed,
                    std::string *set_cookie = nullptr);
 
 } // namespace revlm

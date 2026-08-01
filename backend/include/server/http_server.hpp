@@ -7,7 +7,7 @@
 #include <string>
 #include <string_view>
 
-#include "server/response_sink.hpp"
+#include "streaming/response_sink.hpp"
 #include "util/json.hpp"
 
 namespace revlm

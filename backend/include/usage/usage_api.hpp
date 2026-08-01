@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include "auth/session.hpp"
 #include "request/request.hpp"
 #include "util/datetime.hpp"
 #include "util/json.hpp"
@@ -34,12 +35,14 @@ json request_base_event_json(const Request &req);
 json usage_time_series(const std::vector<Request> &rows, const std::string &tz, std::string_view granularity);
 
 // User-facing usage HTTP handlers.
-json user_models_detail_response(std::string_view raw_request, std::string *set_cookie = nullptr);
-json dashboard_response(std::string_view raw_request, std::string_view target, std::string *set_cookie = nullptr);
-json usage_windows_response(std::string_view raw_request, std::string_view target, std::string *set_cookie = nullptr);
-json requests_response(std::string_view raw_request, std::string_view target, std::string *set_cookie = nullptr);
-json usage_timeseries_response(std::string_view raw_request, std::string_view target,
+json user_models_detail_response(const HttpRequestView &raw_request, std::string *set_cookie = nullptr);
+json dashboard_response(const HttpRequestView &raw_request, std::string_view target, std::string *set_cookie = nullptr);
+json usage_windows_response(const HttpRequestView &raw_request, std::string_view target,
+                            std::string *set_cookie = nullptr);
+json requests_response(const HttpRequestView &raw_request, std::string_view target, std::string *set_cookie = nullptr);
+json usage_timeseries_response(const HttpRequestView &raw_request, std::string_view target,
                                std::string *set_cookie = nullptr);
-json usage_event_detail_response(std::string_view raw_request, long long event_id, std::string *set_cookie = nullptr);
+json usage_event_detail_response(const HttpRequestView &raw_request, long long event_id,
+                                 std::string *set_cookie = nullptr);
 
 } // namespace revlm

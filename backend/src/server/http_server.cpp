@@ -2,6 +2,7 @@
 
 #include "config/config.hpp"
 #include "server/http_dispatch.hpp"
+#include "streaming/transport.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -77,11 +78,18 @@ void HttpServer::drain()
 
 int HttpServer::run(std::atomic_bool &running)
 {
+    initialize_streaming();
     const Config &cfg = config();
     const ListenAddress address = parse_listen_address(cfg.addr);
     auto server = std::make_shared<::httplib::Server>();
     server->set_keep_alive_max_count(1);
-    server->set_payload_max_length(static_cast<size_t>(cfg.http_max_body_bytes));
+    // httplib's payload cap rejects DURING the read (streaming count, 413).
+    // Applied only when a positive limit is configured.  Default 0 =
+    // unlimited: oversized bodies pass through and the upstream's own 413
+    // reaches the client (design doc §10).
+    if (cfg.http_max_body_bytes > 0) {
+        server->set_payload_max_length(static_cast<size_t>(cfg.http_max_body_bytes));
+    }
     server->set_pre_routing_handler([this](const ::httplib::Request &req, ::httplib::Response &res) {
         (void)req;
         if (draining_->load()) {

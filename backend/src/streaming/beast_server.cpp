@@ -10,20 +10,26 @@
 /// Architecture:
 ///   - One io_context with N threads (hardware concurrency).
 ///   - asio::co_spawn acceptor coroutine (accept loop).
-///   - Per-connection coroutine: async_read -> parse -> auth -> dispatch.
-///   - Synchronous writes via BeastResponseSink (same connection thread).
+///   - Per-connection coroutine: async_read_header -> auth -> dispatch.
+///   - Request bodies are NEVER buffered: a BodyFeeder thread reads the body
+///     off the socket into a bounded sliding window while the pump streams it
+///     upstream (O(window) memory regardless of body size).
+///   - Streaming responses are offloaded to the selected streaming transport:
+///     the whole upstream open + SSE pump runs on a dedicated pump thread
+///     (whose curl multi reuses connections), and the connection coroutine
+///     waits for transport completion — freeing the io thread for the stream
+///     duration.
 ///   - Connection: close for all responses (simple, matches httplib).
 
-#include "server/beast_server.hpp"
+#include "streaming/beast_server.hpp"
 
-#include "server/beast_proxy_dispatch.hpp"
-#include "server/http/beast_response_sink.hpp"
+#include "streaming/beast_proxy_dispatch.hpp"
+#include "streaming/beast_response_sink.hpp"
+#include "streaming/transport.hpp"
 
 #include "auth/security.hpp"
 #include "config/config.hpp"
-#include "proxy/anthropics_messages.hpp"
 #include "proxy/gateway.hpp"
-#include "proxy/openai_chat.hpp"
 #include "proxy/openai_responses.hpp"
 #include "request/proxy_request.hpp"
 #include "util/json.hpp"
@@ -36,7 +42,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -100,17 +108,6 @@ static void finish_proxy_usage(ResponseSink & /*res*/, ProxyRequest &pr)
         std::cerr << "usage commit failed request_id=" << pr.request_id << '\n';
 }
 
-/// Commit usage for streaming (mirrors proxy_stream_commit_usage).
-static void proxy_stream_commit_usage(ProxyRequest &pr)
-{
-    try {
-        if (!commit_proxy_usage(pr))
-            std::cerr << "stream usage commit failed\n";
-    } catch (const std::exception &err) {
-        std::cerr << "stream usage callback failed: " << err.what() << '\n';
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Response helpers
 // ---------------------------------------------------------------------------
@@ -133,26 +130,65 @@ static void write_not_found(BeastResponseSink &sink)
 // Per-request dispatch
 // ---------------------------------------------------------------------------
 
+/// Result of dispatching one v1 request.
+struct V1DispatchResult {
+    V1DispatchResult(StreamWait stream_wait, int http_status, std::shared_ptr<std::atomic_bool> started = {})
+        : wait(std::move(stream_wait))
+        , status(http_status)
+        , response_started(std::move(started))
+    {
+    }
+
+    /// Non-empty when the response was offloaded to the transport; the
+    /// connection coroutine must wait for it before closing the socket.
+    StreamWait wait;
+    /// HTTP status written for non-offloaded paths (0 = not written).
+    int status = 0;
+    /// Set by the pump writer after the first complete response write.
+    std::shared_ptr<std::atomic_bool> response_started;
+};
+
+/// Offload the whole streaming request (upstream open + SSE pump) to a
+/// transport thread.  The body flows via pr.http.body_source (the feeder),
+/// the response is written straight to the client socket through a raw fd
+/// writer.  Returns a completion handle the connection coroutine awaits.
+static V1DispatchResult dispatch_v1_stream(GatewayStreamKind kind, beast::tcp_stream &stream, ProxyRequest pr,
+                                           std::string_view client_ip)
+{
+    const int fd = stream.socket().native_handle();
+    auto io_ex = stream.get_executor();
+    auto submission = submit_stream(kind, fd, client_ip, std::move(pr), std::move(io_ex));
+    return { std::move(submission.wait), 0, std::move(submission.response_started) };
+}
+
 /// Handle a single v1 proxy request.
 /// Auth has already been performed; pr.auth is filled.
-/// Returns HTTP status written (or 0 if the response was streamed and
-/// the handler took ownership of the socket).
-static int dispatch_v1_request(beast::tcp_stream &stream, const beast::http::request<beast::http::string_body> &req,
-                               ProxyRequest &pr, std::string_view path, std::string_view request_id,
-                               const std::shared_ptr<std::atomic_bool> &draining)
+static V1DispatchResult dispatch_v1_request(beast::tcp_stream &stream,
+                                            const beast::http::request<beast::http::string_body> &req, ProxyRequest pr,
+                                            std::string_view path, std::string_view client_ip,
+                                            const std::shared_ptr<std::atomic_bool> &draining)
 {
     using verb = beast::http::verb;
     BeastResponseSink sink(stream);
     const auto method = req.method();
 
+    auto write_quota_or_proceed = [&](int &written) -> bool {
+        if (const auto quota_error = paygo_balance_gate(pr.auth.user_id); quota_error.has_value()) {
+            write_json_response(sink, 402, *quota_error);
+            written = 402;
+            return false;
+        }
+        return true;
+    };
+
     // ---- /v1/models (GET) ----
     if (method == verb::get && path == "/v1/models") {
         try {
             write_json_response(sink, 200, beast_token_models_response(pr.auth.channel_group_id));
-            return 200;
+            return { nullptr, 200 };
         } catch (const std::exception &) {
             write_json_response(sink, 502, json("查询模型目录失败"));
-            return 502;
+            return { nullptr, 502 };
         }
     }
 
@@ -163,60 +199,48 @@ static int dispatch_v1_request(beast::tcp_stream &stream, const beast::http::req
             json body = beast_token_model_retrieve_response(model_id, pr.auth.channel_group_id, not_found);
             int status = not_found ? 404 : 200;
             write_json_response(sink, status, std::move(body));
-            return status;
+            return { nullptr, status };
         } catch (const std::exception &) {
             write_json_response(sink, 502, json("查询模型目录失败"));
-            return 502;
+            return { nullptr, 502 };
         }
     }
 
     // ---- POST /v1/chat/completions ----
     if (method == verb::post && path == "/v1/chat/completions") {
-        if (const auto quota_error = paygo_balance_gate(pr.auth.user_id); quota_error.has_value()) {
-            write_json_response(sink, 402, *quota_error);
-            return 402;
-        }
+        int written = 0;
+        if (!write_quota_or_proceed(written))
+            return { nullptr, written };
         pr.is_stream = true;
-        run_chat_completions_stream(sink, std::move(pr), proxy_stream_commit_usage);
-        return 0; // streamed — status set by stream handler
+        return dispatch_v1_stream(GatewayStreamKind::openai_chat, stream, std::move(pr), client_ip);
     }
 
     // ---- POST /v1/messages ----
     if (method == verb::post && path == "/v1/messages") {
-        if (const auto quota_error = paygo_balance_gate(pr.auth.user_id); quota_error.has_value()) {
-            write_json_response(sink, 402, *quota_error);
-            return 402;
-        }
+        int written = 0;
+        if (!write_quota_or_proceed(written))
+            return { nullptr, written };
         pr.is_stream = true;
-        run_messages_stream(sink, std::move(pr), proxy_stream_commit_usage);
-        return 0; // streamed
+        return dispatch_v1_stream(GatewayStreamKind::anthropics_messages, stream, std::move(pr), client_ip);
     }
 
     // ---- POST /v1/responses ----
     if (method == verb::post && path == "/v1/responses") {
-        if (const auto quota_error = paygo_balance_gate(pr.auth.user_id); quota_error.has_value()) {
-            write_json_response(sink, 402, *quota_error);
-            return 402;
-        }
+        int written = 0;
+        if (!write_quota_or_proceed(written))
+            return { nullptr, written };
         pr.is_stream = true;
-        ResponsesProxyExecuteOptions options;
-        options.stream_response = &sink;
-        options.on_usage = proxy_stream_commit_usage;
-        auto result = handle_responses_proxy_request(pr, sink, options);
-        if (!result.handled_stream)
-            finish_proxy_usage(sink, pr);
-        return result.handled_stream ? 0 : result.stream_status;
+        return dispatch_v1_stream(GatewayStreamKind::openai_responses, stream, std::move(pr), client_ip);
     }
 
-    // ---- POST /v1/responses/input_tokens ----
+    // ---- POST /v1/responses/input_tokens (non-streaming, small response) ----
     if (method == verb::post && path == "/v1/responses/input_tokens") {
-        if (const auto quota_error = paygo_balance_gate(pr.auth.user_id); quota_error.has_value()) {
-            write_json_response(sink, 402, *quota_error);
-            return 402;
-        }
+        int written = 0;
+        if (!write_quota_or_proceed(written))
+            return { nullptr, written };
         handle_responses_proxy_request(pr, sink);
         finish_proxy_usage(sink, pr);
-        return 200;
+        return { nullptr, 200 };
     }
 
     // ---- /readyz health check ----
@@ -225,11 +249,11 @@ static int dispatch_v1_request(beast::tcp_stream &stream, const beast::http::req
         sink.set_reason(draining->load() ? "Service Unavailable" : "OK");
         sink.set_content(draining->load() ? std::string{ "draining" } : std::string{ "ok" },
                          "text/plain; charset=utf-8");
-        return draining->load() ? 503 : 200;
+        return { nullptr, draining->load() ? 503 : 200 };
     }
 
     write_not_found(sink);
-    return 404;
+    return { nullptr, 404 };
 }
 
 // ---------------------------------------------------------------------------
@@ -245,16 +269,18 @@ static net::awaitable<void> handle_connection(beast::tcp_stream stream,
     try {
         beast::flat_buffer buf;
 
-        // Parse one request.  Keep-alive is not supported — close after
-        // every response (matches the existing httplib server which sets
-        // keep_alive_max_count=1).
-        // buffer_body reads body in chunks via async_read_some instead of
-        // buffering the entire body inside the parser.  Chunks are accumulated
-        // into a string for dispatch compatibility.
-        // TODO: true sliding window requires interleaving curl sending with
-        // Beast body reading (async_read_some -> CurlRequest::read_body).
+        // Parse headers only — the body is streamed through a sliding window
+        // for POST /v1 routes, never buffered in memory.  body_limit guards
+        // the header phase (it is checked in finish_header against the
+        // declared Content-Length).  IMPORTANT: Beast's DEFAULT limit is
+        // 1 MiB and `body_limit(0)` means "no body allowed", so the
+        // unlimited default must be spelled as the maximum value.
         beast::http::request_parser<beast::http::buffer_body> parser;
-        parser.body_limit(static_cast<std::uint64_t>(config().http_max_body_bytes));
+        if (config().http_max_body_bytes > 0) {
+            parser.body_limit(static_cast<std::uint64_t>(config().http_max_body_bytes));
+        } else {
+            parser.body_limit(std::numeric_limits<std::uint64_t>::max());
+        }
         parser.header_limit(static_cast<std::uint32_t>(config().http_max_header_bytes));
 
         co_await beast::http::async_read_header(stream, buf, parser, net::use_awaitable);
@@ -263,65 +289,19 @@ static net::awaitable<void> handle_connection(beast::tcp_stream stream,
             co_return;
         }
 
-        // Accumulate body chunks via async_read_some loop.
-        std::string body_accum;
-        body_accum.reserve(config().http_max_body_bytes > 0 ?
-                               std::min(static_cast<size_t>(config().http_max_body_bytes), size_t{ 65536 }) :
-                               65536);
-
-        auto &body = parser.get().body();
-        while (!parser.is_done()) {
-            std::array<char, 65536> chunk{};
-            body.data = chunk.data();
-            body.size = sizeof(chunk);
-
-            beast::error_code ec;
-            co_await beast::http::async_read_some(stream, buf, parser, net::redirect_error(net::use_awaitable, ec));
-
-            // buffer_body::put() decrements body.size to the remaining free
-            // space, so bytes written = initial_size - remaining.
-            const size_t bytes_written = sizeof(chunk) - body.size;
-
-            if (ec == beast::http::error::need_buffer) {
-                // Save the partial chunk before re-requesting.
-                body_accum.append(chunk.data(), bytes_written);
-                continue;
-            }
-
-            if (ec) {
-                std::cerr << "beast body read error: " << ec.message() << '\n';
-                co_return;
-            }
-
-            if (bytes_written > 0)
-                body_accum.append(chunk.data(), bytes_written);
-        }
-
-        // Build a string_body request from parsed headers + accumulated body.
+        // Build a request skeleton from the parsed headers.
         beast::http::request<beast::http::string_body> req{ parser.get().method(), parser.get().target(),
                                                             parser.get().version() };
         for (auto const &field : parser.get())
             req.set(field.name_string(), field.value());
-        req.body() = std::move(body_accum);
         req.prepare_payload();
         const std::string request_id = resolve_request_id(req);
 
         const std::string_view path = target_path(req.target());
 
-        // ---- Body-size safety valve ----
-        if (req.body().size() > static_cast<size_t>(config().http_max_body_bytes)) {
-            BeastResponseSink sink(stream);
-            write_json_response(sink, 413, json("payload too large"));
-            log_access(req.method_string(), req.target(), 413, request_id);
-            co_return;
-        }
-
         // ---- Route to v1 proxy handler ----
         if (path.starts_with("/v1/")) {
-            ProxyRequest pr = make_beast_proxy_request(req, client_ip);
-            pr.request_id = request_id;
-
-            // Auth
+            // Auth from headers before touching the body.
             long long user_id = 0, token_id = 0;
             const auto channel_group_id = beast_authenticate_api_token(req, user_id, token_id);
             if (!channel_group_id.has_value()) {
@@ -330,20 +310,73 @@ static net::awaitable<void> handle_connection(beast::tcp_stream stream,
                 log_access(req.method_string(), req.target(), 401, request_id);
                 co_return;
             }
+
+            ProxyRequest pr = make_beast_proxy_request(req, client_ip);
+            pr.request_id = request_id;
             pr.auth.user_id = user_id;
             pr.auth.token_id = token_id;
             pr.auth.channel_group_id = *channel_group_id;
+            if (auto content_length = parser.get().find(beast::http::field::content_length);
+                content_length != parser.get().end()) {
+                const std::string declared_text{ content_length->value() };
+                char *end = nullptr;
+                const long long declared = std::strtoll(declared_text.c_str(), &end, 10);
+                if (end != nullptr && *end == '\0' && declared >= 0)
+                    pr.http.content_length = declared;
+            }
 
-            int status = dispatch_v1_request(stream, req, pr, path, request_id, draining);
-            log_access(req.method_string(), req.target(), status != 0 ? status : 200, request_id);
+            // Sliding-window body: the selected transport owns the feeder
+            // thread and bounded buffers.  The HTTP layer only keeps the
+            // returned handle alive for this request.
+            BodyWindow body_window;
+            if (req.method() == beast::http::verb::post) {
+                // async_read_header over-reads past the header terminator:
+                // any body bytes already pulled into the parser's flat_buffer
+                // are handed to the feeder first (the socket holds the rest).
+                const std::string_view initial_body{ static_cast<const char *>(buf.data().data()), buf.size() };
+                const int body_fd = stream.socket().native_handle();
+                body_window = open_stream_body_window(body_fd, initial_body, config().http_max_body_bytes);
+                pr.http.body_source = body_window.source;
+                buf.consume(buf.size());
+            }
+
+            V1DispatchResult result = dispatch_v1_request(stream, req, std::move(pr), path, client_ip, draining);
+
+            if (result.wait) {
+                // Offloaded: the io thread is freed for the whole stream.
+                co_await async_wait_stream(std::move(result.wait), net::use_awaitable);
+            }
+
+            // Stop the feeder before the socket closes.  Runs for both paths:
+            // the gate path (the pump has finished) and the inline path
+            // (e.g. /v1/responses/input_tokens, whose upstream exchange ran
+            // on this io thread while the feeder read the body concurrently).
+            int access_status = result.status != 0 ? result.status : 200;
+            if (body_window.source) {
+                body_window.stop();
+
+                // Streaming body-size accounting (design doc §10): when a
+                // configured limit is exceeded the feeder stops reading;
+                // do not append a second HTTP response after the pump has
+                // already written one.  0 = no limit — the upstream's own
+                // 413 passes through.
+                if (body_window.limit_exceeded && body_window.limit_exceeded() && result.response_started &&
+                    !result.response_started->load(std::memory_order_acquire)) {
+                    BeastResponseSink sink(stream);
+                    write_json_response(sink, 413, json{ { "error", json{ { "message", "payload too large" } } } });
+                    access_status = 413;
+                }
+            }
+
+            log_access(req.method_string(), req.target(), access_status, request_id);
             co_return;
         }
 
         // ---- /readyz health check ----
         if (path == "/readyz" && req.method() == beast::http::verb::get) {
-            ProxyRequest dummy; // unused for readyz
-            int status = dispatch_v1_request(stream, req, dummy, path, request_id, draining);
-            log_access(req.method_string(), req.target(), status, request_id);
+            ProxyRequest dummy;
+            V1DispatchResult result = dispatch_v1_request(stream, req, std::move(dummy), path, client_ip, draining);
+            log_access(req.method_string(), req.target(), result.status, request_id);
             co_return;
         }
 
@@ -423,6 +456,7 @@ BeastServer::~BeastServer()
 int BeastServer::listen(std::string host, int port, std::atomic_bool &running,
                         const std::shared_ptr<std::atomic_bool> &draining)
 {
+    initialize_streaming();
     impl_->draining = draining;
 
     tcp::resolver resolver(impl_->ioc);
@@ -457,6 +491,7 @@ void BeastServer::stop()
     }
     impl_->ioc.stop();
     impl_->join_threads();
+    shutdown_streaming();
 }
 
 } // namespace revlm

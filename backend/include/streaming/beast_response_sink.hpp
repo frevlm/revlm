@@ -15,7 +15,7 @@
 /// The provider callback runs synchronously inside set_chunked_provider()
 /// and may block (e.g. reading from an upstream CURL stream).
 
-#include "server/response_sink.hpp"
+#include "streaming/response_sink.hpp"
 
 #include <boost/asio.hpp>
 #include <boost/beast/core.hpp>

@@ -9,10 +9,19 @@ void AnthropicsMessages::finalize(json &json_obj)
 {
     // Official: non-stream usage at root; SSE message_delta carries usage at event root
     // (also accept nested message.usage). cache_* optional when prompt caching unused.
+    // "Last-write-wins" per the official SDK's accumulate_event(): fields that are
+    // absent are left at their message_start value — a plain-text message_delta
+    // carries ONLY output_tokens (see streaming-response-critical-fields.md).
     const json usage = json_obj["usage"].is_object() ? json_obj["usage"] : json_obj["message"]["usage"];
-    request.usage.input_tokens = static_cast<int>(usage["input_tokens"].as_int64().value());
-    request.usage.output_tokens = static_cast<int>(usage["output_tokens"].as_int64().value());
-    request.usage.cache_read_tokens = static_cast<int>(usage["cache_read_input_tokens"].as_int64().value_or(0));
+    if (const auto v = usage["input_tokens"].as_int64(); v.has_value()) {
+        request.usage.input_tokens = static_cast<int>(*v);
+    }
+    if (const auto v = usage["output_tokens"].as_int64(); v.has_value()) {
+        request.usage.output_tokens = static_cast<int>(*v);
+    }
+    if (const auto v = usage["cache_read_input_tokens"].as_int64(); v.has_value()) {
+        request.usage.cache_read_tokens = static_cast<int>(*v);
+    }
     const json cache_creation = usage["cache_creation"];
     if (cache_creation.is_object()) {
         request.usage.cache_creation_1h_tokens =
@@ -24,8 +33,12 @@ void AnthropicsMessages::finalize(json &json_obj)
         request.usage.cache_creation_5m_tokens = 0;
     }
     const json model_src = json_obj["message"].is_object() ? json_obj["message"] : json_obj;
-    if (const auto model = model_src["model"].as_string(); model.has_value() && !model->empty()) {
-        request.upstream.model_name = *model;
+    // Billing prefers the client-requested model (set before finalize); the
+    // upstream response model is only a fallback since upstreams may rewrite it.
+    if (request.upstream.model_name.empty()) {
+        if (const auto model = model_src["model"].as_string(); model.has_value() && !model->empty()) {
+            request.upstream.model_name = *model;
+        }
     }
     if (const auto tier = usage["service_tier"].as_string(); tier.has_value()) {
         request.upstream.service_tier = *tier;

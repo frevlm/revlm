@@ -3,6 +3,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <odb/database.hxx>
 
@@ -10,6 +12,20 @@
 
 namespace revlm
 {
+
+/// Parsed request headers + client IP, passed to handlers instead of a raw
+/// HTTP request string (design doc §12: no struct→string→re-parse
+/// roundtrip).  Builders must fill headers (lowercase names) and client_ip.
+struct HttpRequestView {
+    /// Header name/value pairs (names lower-cased).
+    std::vector<std::pair<std::string, std::string>> headers;
+    /// Client IP, trusted for x-forwarded-proto evaluation (injected by the
+    /// ingress/proxy layer, e.g. X-Revlm-Remote-Ip).
+    std::string client_ip;
+
+    /// Value of the first header with the given (case-insensitive) name.
+    std::string_view header(std::string_view name) const;
+};
 
 #pragma db object table("sessions")
 struct Session {
@@ -29,8 +45,8 @@ SessionCookie make_session_cookie();
 std::string session_token_hash(std::string_view opaque_token);
 
 std::optional<std::string> cookie_value(std::string_view raw_request, std::string_view name);
-std::string set_session_cookie_header(std::string_view value, std::string_view raw_request);
-std::string clear_session_cookie_header(std::string_view raw_request);
+std::string set_session_cookie_header(std::string_view value, const HttpRequestView &request);
+std::string clear_session_cookie_header(const HttpRequestView &request);
 
 struct WebSessionAuth {
     bool ok = false;
@@ -40,8 +56,8 @@ struct WebSessionAuth {
     std::string token_hash;
 };
 
-WebSessionAuth authenticate_web_session(std::string_view raw_request);
-WebSessionAuth authenticate_root_web_session(std::string_view raw_request);
+WebSessionAuth authenticate_web_session(const HttpRequestView &request);
+WebSessionAuth authenticate_root_web_session(const HttpRequestView &request);
 
 class SessionStore {
 public:

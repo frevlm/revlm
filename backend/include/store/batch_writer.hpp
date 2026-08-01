@@ -12,10 +12,13 @@ namespace revlm
 {
 
 struct DebitRecord {
-    long long request_id = 0;
     long long user_id = 0;
     long long token_id = 0;
     long long channel_id = 0;
+    std::string request_id_str;
+    std::string response_id;
+    std::string endpoint;
+    std::string method;
     int input_tokens = 0;
     int output_tokens = 0;
     int cache_read_tokens = 0;
@@ -47,8 +50,9 @@ public:
     void flush_now();
 
     // Enqueue a usage record. Called from io threads (any thread).
-    void enqueue(long long request_id, long long user_id, long long token_id, long long channel_id, int input_tokens,
-                 int output_tokens, int cache_read_tokens, int cache_create_1h, int cache_create_5m, double tier_mult,
+    void enqueue(long long user_id, long long token_id, long long channel_id, std::string request_id_str,
+                 std::string response_id, std::string endpoint, std::string method, int input_tokens, int output_tokens,
+                 int cache_read_tokens, int cache_create_1h, int cache_create_5m, double tier_mult,
                  std::string service_tier, double channel_mult, int status_code, int latency_ms,
                  int first_token_latency_ms, bool is_stream, std::string model_name, std::string error_class,
                  std::string error_message, int64_t usd_micro, std::string datetime);

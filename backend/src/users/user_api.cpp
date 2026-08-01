@@ -16,7 +16,7 @@
 namespace revlm
 {
 
-json web_session_auth_failure_response(const WebSessionAuth &auth, std::string_view raw_request,
+json web_session_auth_failure_response(const WebSessionAuth &auth, const HttpRequestView &raw_request,
                                        std::string *set_cookie)
 {
     if (auth.clear_cookie && set_cookie != nullptr) {
@@ -26,7 +26,7 @@ json web_session_auth_failure_response(const WebSessionAuth &auth, std::string_v
     return json({ { "success", false }, { "message", message } });
 }
 
-json register_response(std::string_view raw_request, std::string_view body, std::string *set_cookie)
+json register_response(const HttpRequestView &raw_request, std::string_view body, std::string *set_cookie)
 {
     const auto object = parse_json_object(body);
     if (!object.has_value()) {
@@ -60,7 +60,7 @@ json register_response(std::string_view raw_request, std::string_view body, std:
     }
 }
 
-json login_response(std::string_view raw_request, std::string_view body, std::string *set_cookie)
+json login_response(const HttpRequestView &raw_request, std::string_view body, std::string *set_cookie)
 {
     const auto object = parse_json_object(body);
     if (!object.has_value()) {
@@ -97,7 +97,7 @@ json login_response(std::string_view raw_request, std::string_view body, std::st
     }
 }
 
-json self_response(std::string_view raw_request, std::string *set_cookie)
+json self_response(const HttpRequestView &raw_request, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_user(raw_request, error, set_cookie);
@@ -107,7 +107,7 @@ json self_response(std::string_view raw_request, std::string *set_cookie)
     return json({ { "success", true }, { "data", to_json(*user) } });
 }
 
-json logout_response(std::string_view raw_request, std::string *set_cookie)
+json logout_response(const HttpRequestView &raw_request, std::string *set_cookie)
 {
     const WebSessionAuth auth = authenticate_web_session(raw_request);
     if (!auth.ok) {
@@ -124,7 +124,7 @@ json logout_response(std::string_view raw_request, std::string *set_cookie)
     return json({ { "success", true } });
 }
 
-std::optional<User> api_authenticated_user(std::string_view raw_request, json &error, std::string *set_cookie)
+std::optional<User> api_authenticated_user(const HttpRequestView &raw_request, json &error, std::string *set_cookie)
 {
     const WebSessionAuth auth = authenticate_web_session(raw_request);
     if (auth.ok) {
@@ -134,7 +134,7 @@ std::optional<User> api_authenticated_user(std::string_view raw_request, json &e
     return std::nullopt;
 }
 
-std::optional<User> api_authenticated_admin(std::string_view raw_request, json &error, std::string *set_cookie)
+std::optional<User> api_authenticated_admin(const HttpRequestView &raw_request, json &error, std::string *set_cookie)
 {
     const WebSessionAuth auth = authenticate_root_web_session(raw_request);
     if (auth.ok) {
@@ -144,7 +144,7 @@ std::optional<User> api_authenticated_admin(std::string_view raw_request, json &
     return std::nullopt;
 }
 
-json account_email_response(std::string_view raw_request, std::string_view body, std::string *set_cookie)
+json account_email_response(const HttpRequestView &raw_request, std::string_view body, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_user(raw_request, error, set_cookie);
@@ -198,7 +198,7 @@ json account_email_response(std::string_view raw_request, std::string_view body,
     }
 }
 
-json account_password_response(std::string_view raw_request, std::string_view body, std::string *set_cookie)
+json account_password_response(const HttpRequestView &raw_request, std::string_view body, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_user(raw_request, error, set_cookie);

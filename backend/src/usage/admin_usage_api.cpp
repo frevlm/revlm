@@ -343,7 +343,7 @@ json admin_window_summary(const AdminUsageRange &range, const std::vector<Reques
 
 } // namespace
 
-json admin_dashboard_response(std::string_view raw_request, std::string *set_cookie)
+json admin_dashboard_response(const HttpRequestView &raw_request, std::string *set_cookie)
 {
     json error;
     if (!api_authenticated_admin(raw_request, error, set_cookie)) {
@@ -385,7 +385,7 @@ json admin_dashboard_response(std::string_view raw_request, std::string *set_coo
     }
 }
 
-json admin_usage_page_response(std::string_view raw_request, std::string_view target, std::string *set_cookie)
+json admin_usage_page_response(const HttpRequestView &raw_request, std::string_view target, std::string *set_cookie)
 {
     json error;
     if (!api_authenticated_admin(raw_request, error, set_cookie)) {
@@ -494,7 +494,7 @@ json admin_usage_page_response(std::string_view raw_request, std::string_view ta
     }
 }
 
-json admin_usage_event_detail_response(std::string_view raw_request, long long event_id, std::string *set_cookie)
+json admin_usage_event_detail_response(const HttpRequestView &raw_request, long long event_id, std::string *set_cookie)
 {
     json error;
     if (!api_authenticated_admin(raw_request, error, set_cookie)) {
@@ -518,7 +518,8 @@ json admin_usage_event_detail_response(std::string_view raw_request, long long e
     }
 }
 
-json admin_usage_timeseries_response(std::string_view raw_request, std::string_view target, std::string *set_cookie)
+json admin_usage_timeseries_response(const HttpRequestView &raw_request, std::string_view target,
+                                     std::string *set_cookie)
 {
     json error;
     if (!api_authenticated_admin(raw_request, error, set_cookie)) {

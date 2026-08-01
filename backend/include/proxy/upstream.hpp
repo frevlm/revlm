@@ -2,12 +2,14 @@
 
 #include <cstddef>
 #include <functional>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <sys/types.h>
 #include <vector>
 
 #include "auth/security.hpp"
+#include "streaming/body_source.hpp"
 
 namespace revlm
 {
@@ -23,6 +25,13 @@ struct UpstreamRequest {
     std::string query;
     std::vector<UpstreamHeader> headers;
     std::string body;
+    /// Declared request body size, or -1 when unknown (keeps Content-Length
+    /// framing when streaming from body_source).
+    long long content_length = -1;
+    /// Sliding-window body source.  When set, the request body is streamed
+    /// from this source instead of `body` (which stays empty), so the proxy
+    /// never holds the full body in memory.
+    std::shared_ptr<BodySource> body_source;
 };
 
 struct UpstreamPreparedRequest {
@@ -32,7 +41,8 @@ struct UpstreamPreparedRequest {
     std::string url;
     std::vector<UpstreamHeader> headers;
     std::string body;
-    bool retried_unsupported_parameter = false;
+    long long content_length = -1;
+    std::shared_ptr<BodySource> body_source;
 };
 
 struct UpstreamResponse {
@@ -44,17 +54,20 @@ struct UpstreamResponse {
 struct UpstreamExecutionResult {
     UpstreamPreparedRequest request;
     UpstreamResponse response;
-    bool rewrote_unsupported_parameter = false;
 };
 
 struct UpstreamReadHandle {
-    std::function<ssize_t(char *, size_t)> read;
+    /// Read the next chunk of the upstream response, blocking up to
+    /// idle_timeout_ms for data.  Returns:
+    ///   > 0  bytes read into buffer
+    ///   0    stream finished cleanly
+    ///   < 0  transport error (errno set; ETIMEDOUT = inter-event idle timeout)
+    std::function<ssize_t(char *, size_t, int idle_timeout_ms)> read;
     std::function<void()> close;
-    int poll_fd = -1;
 };
 
 struct UpstreamStreamResponse {
-    UpstreamPreparedRequest request;
+    long long channel_id = 0;
     int status_code = 0;
     std::vector<UpstreamHeader> headers;
     std::string initial_body;
@@ -65,8 +78,7 @@ using UpstreamTransport = std::function<UpstreamResponse(const UpstreamPreparedR
 
 class UpstreamExecutor {
 public:
-    UpstreamPreparedRequest prepare(long long channel_id, UpstreamRequest downstream,
-                                    bool retried_unsupported_parameter = false, bool enforce_ssrf = true) const;
+    UpstreamPreparedRequest prepare(long long channel_id, UpstreamRequest downstream, bool enforce_ssrf = true) const;
     UpstreamExecutionResult execute(long long channel_id, UpstreamRequest downstream,
                                     const UpstreamTransport &transport, bool enforce_ssrf = true) const;
 };

@@ -1,10 +1,12 @@
 #pragma once
 
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
 #include "models/models.hpp"
+#include "streaming/body_source.hpp"
 
 namespace revlm
 {
@@ -13,7 +15,15 @@ struct HttpRequest {
     std::string method;
     std::string path;
     std::string body;
+    /// Declared request body size in bytes, or -1 when unknown.  Used to keep
+    /// Content-Length framing on the upstream request when the body is
+    /// streamed via body_source.
+    long long content_length = -1;
     std::string client_ip;
+    /// Sliding-window body source (Beast path).  When set, `body` stays empty
+    /// and the request body is streamed through this source instead of being
+    /// buffered in memory.
+    std::shared_ptr<BodySource> body_source;
     // Stripped of authorization/x-api-key by make_request.
     // Uses vector<pair<>> to match UpstreamHeader structure.
     std::vector<std::pair<std::string, std::string>> headers;
@@ -55,7 +65,6 @@ struct Upstream {
 };
 
 struct ProxyRequest {
-    long long id = 0;
     std::string request_id;
     std::string time;
     bool is_stream = false;

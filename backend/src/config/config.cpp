@@ -70,6 +70,28 @@ int parse_int_config(const std::string &raw, int fallback, std::string_view key)
     }
 }
 
+/// 64-bit variant for REVLM_HTTP_MAX_BODY_BYTES — body sizes exceed int
+/// range once the proxy cap is lifted (design doc §10).
+static long long parse_ll_config(const std::string &raw, long long fallback, std::string_view key)
+{
+    const std::string value_text = trim_ascii(raw);
+    if (value_text.empty()) {
+        return fallback;
+    }
+    try {
+        size_t pos = 0;
+        long long value = std::stoll(value_text, &pos, 10);
+        if (pos != value_text.size()) {
+            throw std::invalid_argument(std::string{ key } + " must be an integer");
+        }
+        return value;
+    } catch (const std::invalid_argument &) {
+        throw std::invalid_argument(std::string{ key } + " must be an integer");
+    } catch (const std::out_of_range &) {
+        throw std::invalid_argument(std::string{ key } + " is out of range");
+    }
+}
+
 Config load_config_from_env()
 {
     Config config;
@@ -95,11 +117,35 @@ Config load_config_from_env()
                                                                "REVLM_HTTP_READ_HEADER_TIMEOUT_SECONDS");
     config.http_max_header_bytes = parse_int_config(getenv_trimmed("REVLM_HTTP_MAX_HEADER_BYTES"),
                                                     config.http_max_header_bytes, "REVLM_HTTP_MAX_HEADER_BYTES");
-    config.http_max_body_bytes = parse_int_config(getenv_trimmed("REVLM_HTTP_MAX_BODY_BYTES"),
-                                                  config.http_max_body_bytes, "REVLM_HTTP_MAX_BODY_BYTES");
+    config.http_max_body_bytes = parse_ll_config(getenv_trimmed("REVLM_HTTP_MAX_BODY_BYTES"),
+                                                 config.http_max_body_bytes, "REVLM_HTTP_MAX_BODY_BYTES");
     config.proxy_upstream_timeout_seconds = parse_int_config(getenv_trimmed("REVLM_PROXY_UPSTREAM_TIMEOUT_SECONDS"),
                                                              config.proxy_upstream_timeout_seconds,
                                                              "REVLM_PROXY_UPSTREAM_TIMEOUT_SECONDS");
+    config.proxy_upstream_connect_timeout_seconds =
+        parse_int_config(getenv_trimmed("REVLM_PROXY_UPSTREAM_CONNECT_TIMEOUT_SECONDS"),
+                         config.proxy_upstream_connect_timeout_seconds, "REVLM_PROXY_UPSTREAM_CONNECT_TIMEOUT_SECONDS");
+    config.proxy_upstream_upload_stall_seconds =
+        parse_int_config(getenv_trimmed("REVLM_PROXY_UPSTREAM_UPLOAD_STALL_SECONDS"),
+                         config.proxy_upstream_upload_stall_seconds, "REVLM_PROXY_UPSTREAM_UPLOAD_STALL_SECONDS");
+    config.proxy_upstream_upload_stall_low_speed_kbps = parse_int_config(
+        getenv_trimmed("REVLM_PROXY_UPSTREAM_UPLOAD_STALL_LOW_SPEED_KBPS"),
+        config.proxy_upstream_upload_stall_low_speed_kbps, "REVLM_PROXY_UPSTREAM_UPLOAD_STALL_LOW_SPEED_KBPS");
+    config.proxy_upstream_header_timeout_seconds =
+        parse_int_config(getenv_trimmed("REVLM_PROXY_UPSTREAM_HEADER_TIMEOUT_SECONDS"),
+                         config.proxy_upstream_header_timeout_seconds, "REVLM_PROXY_UPSTREAM_HEADER_TIMEOUT_SECONDS");
+    config.proxy_upstream_idle_timeout_seconds =
+        parse_int_config(getenv_trimmed("REVLM_PROXY_UPSTREAM_IDLE_TIMEOUT_SECONDS"),
+                         config.proxy_upstream_idle_timeout_seconds, "REVLM_PROXY_UPSTREAM_IDLE_TIMEOUT_SECONDS");
+    config.proxy_client_write_timeout_seconds =
+        parse_int_config(getenv_trimmed("REVLM_PROXY_CLIENT_WRITE_TIMEOUT_SECONDS"),
+                         config.proxy_client_write_timeout_seconds, "REVLM_PROXY_CLIENT_WRITE_TIMEOUT_SECONDS");
+    config.proxy_upload_rate_limit_kbps = parse_int_config(getenv_trimmed("REVLM_PROXY_UPLOAD_RATE_LIMIT_KBPS"),
+                                                           config.proxy_upload_rate_limit_kbps,
+                                                           "REVLM_PROXY_UPLOAD_RATE_LIMIT_KBPS");
+    config.proxy_upload_rate_limit_classify_mb =
+        parse_int_config(getenv_trimmed("REVLM_PROXY_UPLOAD_RATE_LIMIT_CLASSIFY_MB"),
+                         config.proxy_upload_rate_limit_classify_mb, "REVLM_PROXY_UPLOAD_RATE_LIMIT_CLASSIFY_MB");
     config.redis_db = parse_int_config(getenv_trimmed("REVLM_REDIS_DB"), config.redis_db, "REVLM_REDIS_DB");
     config.gateway_retry_base_delay_ms = parse_int_config(getenv_trimmed("REVLM_GATEWAY_RETRY_BASE_DELAY_MS"),
                                                           config.gateway_retry_base_delay_ms,
@@ -132,8 +178,23 @@ void validate_config(Config &cfg)
     }
     validate_positive(cfg.http_read_header_timeout_seconds, "REVLM_HTTP_READ_HEADER_TIMEOUT_SECONDS");
     validate_positive(cfg.http_max_header_bytes, "REVLM_HTTP_MAX_HEADER_BYTES");
-    validate_positive(cfg.http_max_body_bytes, "REVLM_HTTP_MAX_BODY_BYTES");
-    validate_positive(cfg.proxy_upstream_timeout_seconds, "REVLM_PROXY_UPSTREAM_TIMEOUT_SECONDS");
+    // http_max_body_bytes: 0 = unlimited (default).  The proxy deliberately
+    // sets no default cap — the body-size limit is per-channel/CDN
+    // configuration, so oversized bodies pass through and the upstream's 413
+    // reaches the client (design doc §10 / upstream-upload-behavior.md).
+    if (cfg.http_max_body_bytes < 0) {
+        throw std::invalid_argument("REVLM_HTTP_MAX_BODY_BYTES must not be negative");
+    }
+    validate_non_negative(cfg.proxy_upstream_timeout_seconds, "REVLM_PROXY_UPSTREAM_TIMEOUT_SECONDS");
+    validate_positive(cfg.proxy_upstream_connect_timeout_seconds, "REVLM_PROXY_UPSTREAM_CONNECT_TIMEOUT_SECONDS");
+    validate_positive(cfg.proxy_upstream_upload_stall_seconds, "REVLM_PROXY_UPSTREAM_UPLOAD_STALL_SECONDS");
+    validate_positive(cfg.proxy_upstream_upload_stall_low_speed_kbps,
+                      "REVLM_PROXY_UPSTREAM_UPLOAD_STALL_LOW_SPEED_KBPS");
+    validate_positive(cfg.proxy_upstream_header_timeout_seconds, "REVLM_PROXY_UPSTREAM_HEADER_TIMEOUT_SECONDS");
+    validate_positive(cfg.proxy_upstream_idle_timeout_seconds, "REVLM_PROXY_UPSTREAM_IDLE_TIMEOUT_SECONDS");
+    validate_positive(cfg.proxy_client_write_timeout_seconds, "REVLM_PROXY_CLIENT_WRITE_TIMEOUT_SECONDS");
+    validate_non_negative(cfg.proxy_upload_rate_limit_kbps, "REVLM_PROXY_UPLOAD_RATE_LIMIT_KBPS");
+    validate_positive(cfg.proxy_upload_rate_limit_classify_mb, "REVLM_PROXY_UPLOAD_RATE_LIMIT_CLASSIFY_MB");
     validate_positive(cfg.db_max_open_conns, "REVLM_DB_MAX_OPEN_CONNS");
     validate_positive(cfg.db_max_idle_conns, "REVLM_DB_MAX_IDLE_CONNS");
     if (cfg.db_max_idle_conns > cfg.db_max_open_conns) {

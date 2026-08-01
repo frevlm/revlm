@@ -69,10 +69,7 @@ beast_authenticate_api_token(const boost::beast::http::request<boost::beast::htt
 inline ProxyRequest make_beast_proxy_request(const boost::beast::http::request<boost::beast::http::string_body> &req,
                                              std::string_view remote_addr)
 {
-    static std::atomic<long long> request_counter{ 0 };
-
     ProxyRequest pr;
-    pr.id = ++request_counter;
     pr.time = to_mysql_datetime(std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now()));
     pr.http.method = std::string{ req.method_string() };
 

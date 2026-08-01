@@ -34,18 +34,18 @@ long long unix_now()
     return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-bool is_https_request(std::string_view raw_request)
+bool is_https_request(const HttpRequestView &request)
 {
-    const std::string_view remote_ip = header_value_from_request(raw_request, "x-revlm-remote-ip");
+    const std::string_view remote_ip = request.header("x-revlm-remote-ip");
     const bool trust_proxy = !remote_ip.empty() && is_trusted_proxy_ipv4(remote_ip, default_trusted_proxies());
     if (trust_proxy) {
-        if (const auto forwarded = trusted_forwarded_proto(header_value_from_request(raw_request, "x-forwarded-proto"));
+        if (const auto forwarded = trusted_forwarded_proto(request.header("x-forwarded-proto"));
             forwarded.has_value()) {
             return *forwarded == "https";
         }
     }
     for (std::string_view header_name : { "origin", "referer" }) {
-        std::string_view value = header_value_from_request(raw_request, header_name);
+        std::string_view value = request.header(header_name);
         if (value.starts_with("https://")) {
             return true;
         }
@@ -109,9 +109,9 @@ WebSessionAuth web_session_auth_failure(std::string_view message, bool clear_coo
     return result;
 }
 
-WebSessionAuth authenticate_web_session_impl(std::string_view raw_request, bool require_root)
+WebSessionAuth authenticate_web_session_impl(const HttpRequestView &request, bool require_root)
 {
-    const auto opaque = cookie_value(raw_request, session_cookie_name);
+    const auto opaque = cookie_value(request.header("cookie"), session_cookie_name);
     if (!opaque.has_value() || opaque->empty()) {
         return web_session_auth_failure("未登录", true);
     }
@@ -141,6 +141,22 @@ WebSessionAuth authenticate_web_session_impl(std::string_view raw_request, bool 
 }
 
 } // namespace
+
+std::string_view HttpRequestView::header(std::string_view name) const
+{
+    std::string lower_name{ name };
+    for (char &c : lower_name) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    for (const auto &[key, value] : headers) {
+        if (key == lower_name) {
+            return value;
+        }
+    }
+    return {};
+}
 
 SessionCookie make_session_cookie()
 {
@@ -177,20 +193,20 @@ std::optional<std::string> cookie_value(std::string_view raw_request, std::strin
     return std::nullopt;
 }
 
-std::string set_session_cookie_header(std::string_view value, std::string_view raw_request)
+std::string set_session_cookie_header(std::string_view value, const HttpRequestView &request)
 {
     std::string header = std::string{ session_cookie_name } + "=" + std::string{ value } +
                          "; Path=/; Max-Age=" + std::to_string(session_cookie_max_age) + "; HttpOnly; SameSite=Strict";
-    if (is_https_request(raw_request)) {
+    if (is_https_request(request)) {
         header += "; Secure";
     }
     return header;
 }
 
-std::string clear_session_cookie_header(std::string_view raw_request)
+std::string clear_session_cookie_header(const HttpRequestView &request)
 {
     std::string header = std::string{ session_cookie_name } + "=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict";
-    if (is_https_request(raw_request)) {
+    if (is_https_request(request)) {
         header += "; Secure";
     }
     return header;
@@ -272,14 +288,14 @@ void SessionStore::delete_all_for_user(long long user_id)
     t.commit();
 }
 
-WebSessionAuth authenticate_web_session(std::string_view raw_request)
+WebSessionAuth authenticate_web_session(const HttpRequestView &request)
 {
-    return authenticate_web_session_impl(raw_request, false);
+    return authenticate_web_session_impl(request, false);
 }
 
-WebSessionAuth authenticate_root_web_session(std::string_view raw_request)
+WebSessionAuth authenticate_root_web_session(const HttpRequestView &request)
 {
-    return authenticate_web_session_impl(raw_request, true);
+    return authenticate_web_session_impl(request, true);
 }
 
 } // namespace revlm

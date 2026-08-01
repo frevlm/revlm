@@ -61,10 +61,17 @@ int main()
         return 1;
     }
 
-    const std::string secure_cookie = revlm::set_session_cookie_header(
-        cookie, "GET / HTTP/1.1\r\nHost: test\r\nX-Revlm-Remote-Ip: 127.0.0.1\r\nX-Forwarded-Proto: https\r\n\r\n");
-    const std::string forged_cookie = revlm::set_session_cookie_header(
-        cookie, "GET / HTTP/1.1\r\nHost: test\r\nX-Revlm-Remote-Ip: 203.0.113.10\r\nX-Forwarded-Proto: https\r\n\r\n");
+    // Set-Cookie Secure flag is driven by the parsed request view: the
+    // trusted-proxy IP (x-revlm-remote-ip) decides whether x-forwarded-proto
+    // is believed.
+    const auto make_view = [](bool trusted_proxy) {
+        revlm::HttpRequestView view;
+        view.headers.emplace_back("x-revlm-remote-ip", trusted_proxy ? "127.0.0.1" : "203.0.113.10");
+        view.headers.emplace_back("x-forwarded-proto", "https");
+        return view;
+    };
+    const std::string secure_cookie = revlm::set_session_cookie_header(cookie, make_view(true));
+    const std::string forged_cookie = revlm::set_session_cookie_header(cookie, make_view(false));
     if (expect(secure_cookie.find("; Secure") != std::string::npos, "trusted proxy https should set secure cookie") !=
             0 ||
         expect(forged_cookie.find("; Secure") == std::string::npos,

@@ -1,6 +1,6 @@
 #include "server/http_dispatch.hpp"
 #include "server/http_server.hpp"
-#include "server/http/httplib_response_sink.hpp"
+#include "streaming/httplib_response_sink.hpp"
 #include "auth/security.hpp"
 #include "users/users.hpp"
 #include "users/user_api.hpp"
@@ -9,10 +9,9 @@
 #include "channels/channels.hpp"
 #include "config/config.hpp"
 #include "models/models.hpp"
-#include "proxy/openai_chat.hpp"
-#include "proxy/anthropics_messages.hpp"
 #include "proxy/openai_responses.hpp"
 #include "proxy/gateway.hpp"
+#include "streaming/transport.hpp"
 #include "users/token_api.hpp"
 #include "util/datetime.hpp"
 #include "util/json.hpp"
@@ -55,7 +54,7 @@ struct ParsedRequest {
 
 struct RequestContext {
     ParsedRequest parsed;
-    std::string raw_request;
+    HttpRequestView http_view;
     std::string usage_event_id;
     std::string client_ip;
     std::string set_cookie;
@@ -73,17 +72,6 @@ std::string serialize_json_http_bytes(int status, std::string_view reason, const
     std::string bytes = out.str();
     bytes.append(payload);
     return bytes;
-}
-
-std::string build_raw_http_request(const ::httplib::Request &req)
-{
-    std::ostringstream out;
-    out << req.method << ' ' << req.target << " HTTP/1.1\r\n";
-    for (const auto &header : req.headers) {
-        out << header.first << ": " << header.second << "\r\n";
-    }
-    out << "\r\n" << req.body;
-    return out.str();
 }
 
 // Correlation id, not a client contract: OpenAI/Anthropic return it in the response, never require it in.
@@ -160,7 +148,7 @@ json token_model_retrieve_response(std::string_view requested_model_id, long lon
     }
 }
 
-json billing_balance_response(std::string_view raw_request, std::string *set_cookie)
+json billing_balance_response(const HttpRequestView &raw_request, std::string *set_cookie)
 {
     json error;
     const auto user = api_authenticated_user(raw_request, error, set_cookie);
@@ -197,7 +185,8 @@ bool validate_parsed_request(const ParsedRequest &parsed, ResponseSink &res)
         write_json(res, 431, json("request header too large"));
         return false;
     }
-    if (parsed.content_length > static_cast<size_t>(config().http_max_body_bytes)) {
+    if (parsed.content_length > 0 && config().http_max_body_bytes > 0 &&
+        static_cast<long long>(parsed.content_length) > config().http_max_body_bytes) {
         write_json(res, 413, json("payload too large"));
         return false;
     }
@@ -207,9 +196,20 @@ bool validate_parsed_request(const ParsedRequest &parsed, ResponseSink &res)
 RequestContext make_request_context(const ::httplib::Request &req)
 {
     const std::string client_ip = req.remote_addr.empty() ? "127.0.0.1" : req.remote_addr;
+    HttpRequestView view;
+    view.client_ip = client_ip;
+    view.headers.reserve(req.headers.size() + 2);
+    // Mirror the X-Revlm-* metadata previously injected into the raw request
+    // (inject_request_metadata): the trusted proxy IP drives x-forwarded-proto
+    // evaluation for the Set-Cookie Secure flag.
+    view.headers.emplace_back("x-revlm-remote-ip", client_ip);
+    view.headers.emplace_back("x-revlm-client-ip", client_ip);
+    for (const auto &entry : req.headers) {
+        view.headers.emplace_back(lowercase_ascii(entry.first), entry.second);
+    }
     return RequestContext{
         .parsed = parsed_request_from_httplib(req),
-        .raw_request = inject_request_metadata(build_raw_http_request(req), client_ip),
+        .http_view = std::move(view),
         .usage_event_id = "req_" + boost::uuids::to_string(boost::uuids::random_generator{}()),
         .client_ip = client_ip,
     };
@@ -280,14 +280,13 @@ public:
 
 ProxyRequest make_request(const ::httplib::Request &req)
 {
-    static std::atomic<long long> request_counter{ 0 };
     ProxyRequest pr;
-    pr.id = ++request_counter;
     pr.request_id = resolve_request_id(req);
     pr.time = to_mysql_datetime(std::chrono::time_point_cast<std::chrono::seconds>(std::chrono::system_clock::now()));
     pr.http.method = req.method;
     pr.http.path = req.path;
     pr.http.body = req.body;
+    pr.http.content_length = static_cast<long long>(req.body.size());
     pr.http.client_ip = req.remote_addr.empty() ? "127.0.0.1" : req.remote_addr;
     for (const auto &entry : req.headers) {
         const std::string lower = lowercase_ascii(entry.first);
@@ -312,17 +311,6 @@ ProxyRequest make_request(const ::httplib::Request &req)
     return pr;
 }
 
-void proxy_stream_commit_usage(ProxyRequest &pr)
-{
-    try {
-        if (!commit_proxy_usage(pr)) {
-            std::cerr << "stream usage commit failed\n";
-        }
-    } catch (const std::exception &err) {
-        std::cerr << "stream usage callback failed: " << err.what() << '\n';
-    }
-}
-
 void finish_proxy_usage(ResponseSink &res, ProxyRequest &pr)
 {
     (void)res;
@@ -345,7 +333,8 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
         return [fn = std::move(fn)](const ::httplib::Request &req, ::httplib::Response &res) {
             ProxyRequest pr = make_request(req);
             res.set_header("X-Request-Id", resolve_request_id(req));
-            if (pr.http.body.size() > static_cast<size_t>(config().http_max_body_bytes)) {
+            const long long max_body = config().http_max_body_bytes;
+            if (max_body > 0 && pr.http.body.size() > static_cast<size_t>(max_body)) {
                 HttplibResponseSink sink(res);
                 write_json(sink, 413, json("payload too large"));
                 log_access(res, pr.http.method, pr.http.path, res.status);
@@ -384,90 +373,89 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
                    res.set_content("ok", "text/plain; charset=utf-8");
                }));
     server.Get("/api/user/self", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return self_response(ctx.raw_request, &ctx.set_cookie);
+                   return self_response(ctx.http_view, &ctx.set_cookie);
                }));
     server.Get("/api/user/logout", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return logout_response(ctx.raw_request, &ctx.set_cookie);
+                   return logout_response(ctx.http_view, &ctx.set_cookie);
                }));
     server.Get("/api/user/models/detail", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return user_models_detail_response(ctx.raw_request, &ctx.set_cookie);
+                   return user_models_detail_response(ctx.http_view, &ctx.set_cookie);
                }));
     server.Get("/api/dashboard", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return dashboard_response(ctx.raw_request, ctx.parsed.target, &ctx.set_cookie);
+                   return dashboard_response(ctx.http_view, ctx.parsed.target, &ctx.set_cookie);
                }));
     server.Get("/api/request/windows", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return usage_windows_response(ctx.raw_request, ctx.parsed.target, &ctx.set_cookie);
+                   return usage_windows_response(ctx.http_view, ctx.parsed.target, &ctx.set_cookie);
                }));
     server.Get("/api/request/events", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return requests_response(ctx.raw_request, ctx.parsed.target, &ctx.set_cookie);
+                   return requests_response(ctx.http_view, ctx.parsed.target, &ctx.set_cookie);
                }));
     server.Get("/api/request/timeseries", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return usage_timeseries_response(ctx.raw_request, ctx.parsed.target, &ctx.set_cookie);
+                   return usage_timeseries_response(ctx.http_view, ctx.parsed.target, &ctx.set_cookie);
                }));
     server.Get("/api/request/events/:event_id/detail", api([](const ::httplib::Request &req, RequestContext &ctx) {
                    const auto event_id = path_param_i64(req, "event_id");
                    if (!event_id.has_value()) {
                        return json({ { "success", false }, { "message", "event_id 无效" } });
                    }
-                   return usage_event_detail_response(ctx.raw_request, *event_id, &ctx.set_cookie);
+                   return usage_event_detail_response(ctx.http_view, *event_id, &ctx.set_cookie);
                }));
     server.Get("/api/token", api([](const ::httplib::Request &, RequestContext &ctx) {
                    json error;
-                   const auto user = api_authenticated_user(ctx.raw_request, error, &ctx.set_cookie);
+                   const auto user = api_authenticated_user(ctx.http_view, error, &ctx.set_cookie);
                    if (!user.has_value()) {
                        return error;
                    }
                    return list_user_tokens_response(*user);
                }));
     server.Post("/api/token", api([](const ::httplib::Request &req, RequestContext &ctx) {
-                    return create_user_token_response(ctx.raw_request, req.body, &ctx.set_cookie);
+                    return create_user_token_response(ctx.http_view, req.body, &ctx.set_cookie);
                 }));
     server.Get("/api/token/:token_id/reveal", api([](const ::httplib::Request &req, RequestContext &ctx) {
                    const auto token_id = path_param_i64(req, "token_id");
-                   return token_id.has_value() ?
-                              reveal_user_token_response(ctx.raw_request, *token_id, &ctx.set_cookie) :
-                              json({ { "success", false }, { "message", "token_id 不合法" } });
+                   return token_id.has_value() ? reveal_user_token_response(ctx.http_view, *token_id, &ctx.set_cookie) :
+                                                 json({ { "success", false }, { "message", "token_id 不合法" } });
                }));
     server.Post("/api/token/:token_id/rotate", api([](const ::httplib::Request &req, RequestContext &ctx) {
                     const auto token_id = path_param_i64(req, "token_id");
                     return token_id.has_value() ?
-                               rotate_user_token_response(ctx.raw_request, *token_id, &ctx.set_cookie) :
+                               rotate_user_token_response(ctx.http_view, *token_id, &ctx.set_cookie) :
                                json({ { "success", false }, { "message", "token_id 不合法" } });
                 }));
     server.Post("/api/token/:token_id/revoke", api([](const ::httplib::Request &req, RequestContext &ctx) {
                     const auto token_id = path_param_i64(req, "token_id");
                     return token_id.has_value() ?
-                               revoke_user_token_response(ctx.raw_request, *token_id, &ctx.set_cookie) :
+                               revoke_user_token_response(ctx.http_view, *token_id, &ctx.set_cookie) :
                                json({ { "success", false }, { "message", "token_id 不合法" } });
                 }));
     server.Delete("/api/token/:token_id", api([](const ::httplib::Request &req, RequestContext &ctx) {
                       const auto token_id = path_param_i64(req, "token_id");
                       return token_id.has_value() ?
-                                 delete_user_token_response(ctx.raw_request, *token_id, &ctx.set_cookie) :
+                                 delete_user_token_response(ctx.http_view, *token_id, &ctx.set_cookie) :
                                  json({ { "success", false }, { "message", "token_id 不合法" } });
                   }));
     server.Get("/api/token/:token_id/channel", api([](const ::httplib::Request &req, RequestContext &ctx) {
                    const auto token_id = path_param_i64(req, "token_id");
-                   return token_id.has_value() ? token_channel_response(ctx.raw_request, *token_id, &ctx.set_cookie) :
+                   return token_id.has_value() ? token_channel_response(ctx.http_view, *token_id, &ctx.set_cookie) :
                                                  json({ { "success", false }, { "message", "token_id 不合法" } });
                }));
     server.Put("/api/token/:token_id/channel", api([](const ::httplib::Request &req, RequestContext &ctx) {
                    const auto token_id = path_param_i64(req, "token_id");
                    return token_id.has_value() ?
-                              set_token_channel_response(ctx.raw_request, *token_id, req.body, &ctx.set_cookie) :
+                              set_token_channel_response(ctx.http_view, *token_id, req.body, &ctx.set_cookie) :
                               json({ { "success", false }, { "message", "token_id 不合法" } });
                }));
     server.Post("/api/user/register", api([](const ::httplib::Request &req, RequestContext &ctx) {
-                    return register_response(ctx.raw_request, req.body, &ctx.set_cookie);
+                    return register_response(ctx.http_view, req.body, &ctx.set_cookie);
                 }));
     server.Post("/api/user/login", api([](const ::httplib::Request &req, RequestContext &ctx) {
-                    return login_response(ctx.raw_request, req.body, &ctx.set_cookie);
+                    return login_response(ctx.http_view, req.body, &ctx.set_cookie);
                 }));
     server.Post("/api/account/email", api([](const ::httplib::Request &req, RequestContext &ctx) {
-                    return account_email_response(ctx.raw_request, req.body, &ctx.set_cookie);
+                    return account_email_response(ctx.http_view, req.body, &ctx.set_cookie);
                 }));
     server.Post("/api/account/password", api([](const ::httplib::Request &req, RequestContext &ctx) {
-                    return account_password_response(ctx.raw_request, req.body, &ctx.set_cookie);
+                    return account_password_response(ctx.http_view, req.body, &ctx.set_cookie);
                 }));
     server.Get("/v1/models", v1_http([](const ::httplib::Request &, ResponseSink &res, ProxyRequest &pr) {
                    try {
@@ -492,7 +480,7 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
                         return;
                     }
                     pr.is_stream = true;
-                    run_chat_completions_stream(res, std::move(pr), proxy_stream_commit_usage);
+                    run_inline_stream(GatewayStreamKind::openai_chat, std::move(pr), res);
                     return;
                 }));
     server.Post("/v1/messages", v1_http([](const ::httplib::Request &req, ResponseSink &res, ProxyRequest &pr) {
@@ -501,7 +489,7 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
                         return;
                     }
                     pr.is_stream = true;
-                    run_messages_stream(res, std::move(pr), proxy_stream_commit_usage);
+                    run_inline_stream(GatewayStreamKind::anthropics_messages, std::move(pr), res);
                     return;
                 }));
     server.Post("/v1/responses", v1_http([](const ::httplib::Request &req, ResponseSink &res, ProxyRequest &pr) {
@@ -510,13 +498,7 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
                         return;
                     }
                     pr.is_stream = true;
-                    ResponsesProxyExecuteOptions options;
-                    options.stream_response = &res;
-                    options.on_usage = proxy_stream_commit_usage;
-                    auto result = handle_responses_proxy_request(pr, res, options);
-                    if (!result.handled_stream) {
-                        finish_proxy_usage(res, pr);
-                    }
+                    run_inline_stream(GatewayStreamKind::openai_responses, std::move(pr), res);
                 }));
     server.Post("/v1/responses/input_tokens",
                 v1_http([](const ::httplib::Request & /* req */, ResponseSink &res, ProxyRequest &pr) {
@@ -529,59 +511,59 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
                 }));
 
     server.Get("/api/admin/dashboard", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return admin_dashboard_response(ctx.raw_request, &ctx.set_cookie);
+                   return admin_dashboard_response(ctx.http_view, &ctx.set_cookie);
                }));
     server.Get("/api/admin/request", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return admin_usage_page_response(ctx.raw_request, ctx.parsed.target, &ctx.set_cookie);
+                   return admin_usage_page_response(ctx.http_view, ctx.parsed.target, &ctx.set_cookie);
                }));
     server.Get("/api/admin/request/timeseries", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return admin_usage_timeseries_response(ctx.raw_request, ctx.parsed.target, &ctx.set_cookie);
+                   return admin_usage_timeseries_response(ctx.http_view, ctx.parsed.target, &ctx.set_cookie);
                }));
     server.Get("/api/admin/request/events/:event_id/detail",
                api([](const ::httplib::Request &req, RequestContext &ctx) {
                    const auto event_id = path_param_i64(req, "event_id");
                    return event_id.has_value() ?
-                              admin_usage_event_detail_response(ctx.raw_request, *event_id, &ctx.set_cookie) :
+                              admin_usage_event_detail_response(ctx.http_view, *event_id, &ctx.set_cookie) :
                               json({ { "success", false }, { "message", "event_id 无效" } });
                }));
     server.Get("/api/admin/users", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return admin_list_users_response(ctx.raw_request, &ctx.set_cookie);
+                   return admin_list_users_response(ctx.http_view, &ctx.set_cookie);
                }));
     server.Post("/api/admin/users", api([](const ::httplib::Request &req, RequestContext &ctx) {
-                    return admin_create_user_response(ctx.raw_request, req.body, &ctx.set_cookie);
+                    return admin_create_user_response(ctx.http_view, req.body, &ctx.set_cookie);
                 }));
     server.Put("/api/admin/users/:user_id", api([](const ::httplib::Request &req, RequestContext &ctx) {
                    const auto user_id = path_param_i64(req, "user_id");
                    return user_id.has_value() ?
-                              admin_update_user_response(*user_id, ctx.raw_request, req.body, &ctx.set_cookie) :
+                              admin_update_user_response(*user_id, ctx.http_view, req.body, &ctx.set_cookie) :
                               json({ { "success", false }, { "message", "用户不存在" } });
                }));
     server.Delete("/api/admin/users/:user_id", api([](const ::httplib::Request &req, RequestContext &ctx) {
                       const auto user_id = path_param_i64(req, "user_id");
                       return user_id.has_value() ?
-                                 admin_delete_user_response(*user_id, ctx.raw_request, &ctx.set_cookie) :
+                                 admin_delete_user_response(*user_id, ctx.http_view, &ctx.set_cookie) :
                                  json({ { "success", false }, { "message", "用户不存在" } });
                   }));
     server.Post("/api/admin/users/:user_id/password", api([](const ::httplib::Request &req, RequestContext &ctx) {
                     const auto user_id = path_param_i64(req, "user_id");
-                    return user_id.has_value() ? admin_reset_user_password_response(*user_id, ctx.raw_request, req.body,
-                                                                                    &ctx.set_cookie) :
-                                                 json({ { "success", false }, { "message", "用户不存在" } });
+                    return user_id.has_value() ?
+                               admin_reset_user_password_response(*user_id, ctx.http_view, req.body, &ctx.set_cookie) :
+                               json({ { "success", false }, { "message", "用户不存在" } });
                 }));
     server.Post("/api/admin/users/:user_id/balance", api([](const ::httplib::Request &req, RequestContext &ctx) {
                     const auto user_id = path_param_i64(req, "user_id");
                     return user_id.has_value() ?
-                               admin_add_user_balance_response(*user_id, ctx.raw_request, req.body, &ctx.set_cookie) :
+                               admin_add_user_balance_response(*user_id, ctx.http_view, req.body, &ctx.set_cookie) :
                                json({ { "success", false }, { "message", "用户不存在" } });
                 }));
 
     server.Get("/api/billing/balance", api([](const ::httplib::Request &, RequestContext &ctx) {
-                   return billing_balance_response(ctx.raw_request, &ctx.set_cookie);
+                   return billing_balance_response(ctx.http_view, &ctx.set_cookie);
                }));
 
     auto channel_groups = api([](const ::httplib::Request &req, RequestContext &ctx) {
         const ChannelGroupsParsedRequest parsed{ ctx.parsed.method, ctx.parsed.path, ctx.parsed.target };
-        return channel_groups_route(ctx.raw_request, req.body, parsed, &ctx.set_cookie);
+        return channel_groups_route(ctx.http_view, req.body, parsed, &ctx.set_cookie);
     });
     server.Get(R"(/api/admin/channel-groups.*)", channel_groups);
     server.Post(R"(/api/admin/channel-groups.*)", channel_groups);
@@ -590,7 +572,7 @@ void register_http_routes(::httplib::Server &server, const std::shared_ptr<std::
 
     auto channels = api([](const ::httplib::Request &req, RequestContext &ctx) {
         const ChannelParsedRequest parsed{ ctx.parsed.method, ctx.parsed.path, ctx.parsed.target };
-        return channel_route(ctx.raw_request, req.body, parsed, &ctx.set_cookie);
+        return channel_route(ctx.http_view, req.body, parsed, &ctx.set_cookie);
     });
     server.Get(R"(/api/channel.*)", channels);
     server.Post(R"(/api/channel.*)", channels);
@@ -618,18 +600,6 @@ std::string handle_http_request(std::string_view request, bool draining)
         return serialize_json_http_bytes(400, "Bad Request", json("bad request"));
     }
     return buffer.substr(request.size());
-}
-
-std::string inject_request_metadata(std::string_view request, std::string_view client_ip)
-{
-    std::string enriched{ request };
-    const size_t request_line_end = enriched.find("\r\n");
-    if (request_line_end == std::string::npos || client_ip.empty()) {
-        return enriched;
-    }
-    enriched.insert(request_line_end + 2, "X-Revlm-Remote-Ip: " + std::string{ client_ip } + "\r\n");
-    enriched.insert(request_line_end + 2, "X-Revlm-Client-Ip: " + std::string{ client_ip } + "\r\n");
-    return enriched;
 }
 
 } // namespace revlm

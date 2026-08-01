@@ -24,6 +24,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <functional>
 #include <iostream>
@@ -156,8 +157,6 @@ std::optional<json> paygo_balance_gate(long long user_id)
 
 bool commit_proxy_usage(ProxyRequest &pr)
 {
-    if (pr.id <= 0)
-        return false;
     if (pr.auth.user_id <= 0)
         return false;
     if (pr.auth.token_id <= 0)
@@ -174,7 +173,8 @@ bool commit_proxy_usage(ProxyRequest &pr)
     (void)balance_ledger().deduct(pr.auth.user_id, usd_micro);
 
     // Defer the DB write to the background batch writer.
-    batch_writer().enqueue(pr.id, pr.auth.user_id, pr.auth.token_id, pr.upstream.channel_id, pr.usage.input_tokens,
+    batch_writer().enqueue(pr.auth.user_id, pr.auth.token_id, pr.upstream.channel_id, pr.request_id,
+                           pr.upstream.response_id, pr.http.path, pr.http.method, pr.usage.input_tokens,
                            pr.usage.output_tokens, pr.usage.cache_read_tokens, pr.usage.cache_creation_1h_tokens,
                            pr.usage.cache_creation_5m_tokens, pr.upstream.tier_multiplier, pr.upstream.service_tier,
                            pr.upstream.channel_multiplier, pr.upstream.status_code, pr.upstream.latency_ms,
@@ -230,7 +230,7 @@ ScheduledUpstreamStreamExecution open_scheduled_upstream_stream(long long channe
             throw std::runtime_error("channel not found");
         const bool allow_private_target = upstream_channel_allows_private_target(channel->base_url);
         const UpstreamPreparedRequest prepared =
-            executor.prepare(channel_id, std::move(downstream), false, !allow_private_target);
+            executor.prepare(channel_id, std::move(downstream), !allow_private_target);
         UpstreamStreamResponse upstream =
             default_upstream_http_stream_transport(prepared, timeout_ms, allow_private_target);
         return ScheduledUpstreamStreamExecution{
@@ -246,7 +246,8 @@ ScheduledUpstreamStreamExecution open_scheduled_upstream_stream(long long channe
                     .message = "upstream URL is invalid",
                 },
         };
-    } catch (const std::exception &) {
+    } catch (const std::exception &err) {
+        std::fprintf(stderr, "open_scheduled_upstream_stream failed: %s\n", err.what());
         return ScheduledUpstreamStreamExecution{
             .result = std::nullopt,
             .transport_error =
@@ -321,6 +322,8 @@ UpstreamRequest build_proxy_upstream_request(const ProxyRequest &pr, std::string
     downstream.method = "POST";
     downstream.path = std::string{ path };
     downstream.body = pr.http.body;
+    downstream.content_length = pr.http.content_length;
+    downstream.body_source = pr.http.body_source;
     downstream.headers = std::move(headers);
     return downstream;
 }
@@ -328,23 +331,50 @@ UpstreamRequest build_proxy_upstream_request(const ProxyRequest &pr, std::string
 namespace
 {
 
-bool send_all_fd(int fd, std::string_view data)
+bool send_all_fd(int fd, std::string_view data, std::chrono::milliseconds timeout)
 {
-    while (!data.empty()) {
-        const ssize_t n = ::send(fd, data.data(), data.size(), MSG_NOSIGNAL);
-        if (n <= 0) {
-            return false;
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    size_t sent = 0;
+    while (sent < data.size()) {
+        const ssize_t n = ::send(fd, data.data() + sent, data.size() - sent, MSG_NOSIGNAL);
+        if (n > 0) {
+            sent += static_cast<size_t>(n);
+            continue;
         }
-        data.remove_prefix(static_cast<size_t>(n));
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            // Socket buffer full (slow client): wait for writability, bounded
+            // by the deadline so a stuck client cannot hold a pump thread
+            // forever.
+            for (;;) {
+                if (std::chrono::steady_clock::now() >= deadline)
+                    return false;
+                pollfd pfd{};
+                pfd.fd = fd;
+                pfd.events = POLLOUT;
+                const int rc = ::poll(&pfd, 1, 50);
+                if (rc > 0)
+                    break;
+                if (rc < 0 && errno != EINTR)
+                    return false;
+            }
+            continue;
+        }
+        return false; // closed / error
     }
     return true;
 }
 
 } // namespace
 
-ClientWriter client_writer_from_fd(int fd)
+ClientWriter client_writer_from_fd(int fd, std::shared_ptr<std::atomic_bool> response_started)
 {
-    return [fd](std::string_view data) { return send_all_fd(fd, data); };
+    return [fd, response_started = std::move(response_started)](std::string_view data) {
+        const std::chrono::milliseconds timeout(std::max(1, config().proxy_client_write_timeout_seconds) * 1000);
+        const bool sent = send_all_fd(fd, data, timeout);
+        if (sent && response_started)
+            response_started->store(true, std::memory_order_release);
+        return sent;
+    };
 }
 
 bool is_sse_content_type(std::string_view content_type)
@@ -361,7 +391,7 @@ std::string read_remaining_stream(const UpstreamReadHandle &stream)
     std::string out;
     char buffer[8192];
     for (;;) {
-        const ssize_t n = stream.read(buffer, sizeof(buffer));
+        const ssize_t n = stream.read(buffer, sizeof(buffer), 60000);
         if (n <= 0) {
             break;
         }
@@ -416,7 +446,80 @@ namespace
 constexpr size_t kMaxSseLineBytes = 1024 * 1024; // 1 MiB
 constexpr size_t kMaxSseEventBytes = 2048 * 1024; // 2 MiB
 constexpr size_t kFlushBytes = 1024;
-constexpr int kDisconnectDrainTimeoutMs = 1500;
+constexpr size_t kLineChunkBytes = 8192; // line buffer block size (see ChainedLine)
+
+/// Growable line buffer built from fixed 8 KiB blocks instead of a single
+/// std::string, so a long line (e.g. a 40 KiB base64 signature_delta) costs
+/// exactly ⌈len/8K⌉ blocks — no 2× doubling slack from libc++ reallocation.
+/// Only the completed line materialises as a std::string (one copy), and only
+/// at the size it really needs.
+class ChainedLine {
+public:
+    void append(std::string_view bytes)
+    {
+        size_t pos = 0;
+        while (pos < bytes.size()) {
+            if (tail_free_ == 0)
+                push_block();
+            const size_t n = std::min<size_t>(tail_free_, bytes.size() - pos);
+            std::memcpy(tail_ + kLineChunkBytes - tail_free_, bytes.data() + pos, n);
+            tail_free_ -= n;
+            pos += n;
+        }
+        size_ += bytes.size();
+    }
+
+    /// Copy the accumulated line into a string and reset.  `extra` reserves
+    /// headroom for the append that immediately follows (used for the
+    /// `\r\n`-free raw event reconstruction).
+    std::string take(size_t extra)
+    {
+        std::string out;
+        out.reserve(size_ + extra);
+        out.resize(size_);
+        char *dst = out.data();
+        size_t written = 0;
+        for (const std::unique_ptr<char[]> &block : blocks_) {
+            const size_t n = std::min<size_t>(kLineChunkBytes, size_ - written);
+            std::memcpy(dst, block.get(), n);
+            dst += n;
+            written += n;
+            if (written >= size_)
+                break;
+        }
+        clear();
+        return out;
+    }
+
+    size_t size() const
+    {
+        return size_;
+    }
+    bool empty() const
+    {
+        return size_ == 0;
+    }
+    void clear()
+    {
+        blocks_.clear();
+        tail_ = nullptr;
+        tail_free_ = 0;
+        size_ = 0;
+    }
+
+private:
+    void push_block()
+    {
+        blocks_.push_back(std::make_unique<char[]>(kLineChunkBytes));
+        tail_ = blocks_.back().get();
+        tail_free_ = kLineChunkBytes;
+    }
+
+    std::deque<std::unique_ptr<char[]>> blocks_;
+    char *tail_ = nullptr;
+    size_t tail_free_ = 0;
+    size_t size_ = 0;
+};
 
 struct SseEvent {
     std::string data;
@@ -426,26 +529,123 @@ struct SseEvent {
 
 class SseReader {
 public:
-    bool consume(std::string_view chunk, std::vector<SseEvent> &out)
+    /// Scan a response chunk and produce:
+    ///   - `forward_spans`: complete events fully contained in this chunk
+    ///     that need no parsing — forwarded verbatim as string_views into
+    ///     the chunk (zero-copy; design doc §9 — the vast majority of SSE
+    ///     events are pure deltas that must never touch line_/raw_event_).
+    ///   - `events`: everything else (cross-chunk events, CRLF input,
+    ///     events mentioning usage/model/message_stop/[DONE]) accumulated
+    ///     into data_/raw_event_ as before.
+    /// The views in `forward_spans` reference `chunk` and are only valid
+    /// until the next call.
+    bool consume(std::string_view chunk, std::vector<std::string_view> &forward_spans, std::vector<SseEvent> &events)
     {
         if (!ok_) {
             return false;
         }
-        for (char ch : chunk) {
-            if (ch == '\r') {
-                continue;
-            }
-            if (ch == '\n') {
-                if (!push_line(out)) {
+
+        size_t pos = 0;
+
+        // 1) Finish a line that straddled the previous chunk boundary.
+        if (!line_pending_.empty()) {
+            const size_t nl = chunk.find('\n');
+            if (nl == std::string_view::npos) {
+                if (line_pending_.size() + chunk.size() > kMaxSseLineBytes) {
+                    ok_ = false;
                     return false;
                 }
-                continue;
+                line_pending_.append(chunk);
+                return ok_;
             }
-            line_.push_back(ch);
-            if (line_.size() > kMaxSseLineBytes) {
+            std::string_view tail = chunk.substr(0, nl);
+            while (!tail.empty() && tail.back() == '\r')
+                tail.remove_suffix(1);
+            line_pending_.append(tail);
+            std::string line = line_pending_.take(0);
+            event_bytes_ += line.size() + 1;
+            if (event_bytes_ > kMaxSseEventBytes) {
                 ok_ = false;
                 return false;
             }
+            if (!push_line(line, events)) {
+                return false;
+            }
+            pos = nl + 1;
+            block_event_start_ = std::string_view::npos; // any straddling line kills block refs
+        }
+
+        // 2) In-chunk fast scan.
+        while (pos < chunk.size()) {
+            const size_t nl = chunk.find('\n', pos);
+            if (nl == std::string_view::npos) {
+                // Trailing line without a newline: stash it.  If an event
+                // started in this chunk, its bytes must move to the
+                // accumulation buffers before the next chunk continues it.
+                const std::string_view rest = chunk.substr(pos);
+                if (event_open_ && block_event_start_ != std::string_view::npos) {
+                    const std::string_view seen = chunk.substr(block_event_start_, pos - block_event_start_);
+                    event_bytes_ += seen.size();
+                    if (event_bytes_ > kMaxSseEventBytes) {
+                        ok_ = false;
+                        return false;
+                    }
+                    flush_block_lines(seen, events);
+                    block_event_start_ = std::string_view::npos;
+                }
+                if (rest.size() > kMaxSseLineBytes) {
+                    ok_ = false;
+                    return false;
+                }
+                line_pending_.clear();
+                line_pending_.append(rest);
+                break;
+            }
+
+            std::string_view line = chunk.substr(pos, nl - pos);
+            while (!line.empty() && line.back() == '\r')
+                line.remove_suffix(1);
+
+            if (line.empty()) {
+                // Blank line = end of the current event.
+                if (event_open_) {
+                    if (block_event_start_ != std::string_view::npos) {
+                        const std::string_view ev = chunk.substr(block_event_start_, nl + 1 - block_event_start_);
+                        event_bytes_ += ev.size();
+                        if (event_bytes_ > kMaxSseEventBytes) {
+                            ok_ = false;
+                            return false;
+                        }
+                        dispatch_block_event(ev, forward_spans, events);
+                        block_event_start_ = std::string_view::npos;
+                        event_open_ = false;
+                        event_bytes_ = 0;
+                    } else {
+                        // Cross-chunk event complete.
+                        if (!push_line({}, events)) {
+                            return false;
+                        }
+                    }
+                }
+            } else {
+                if (!event_open_) {
+                    event_open_ = true;
+                    block_event_start_ = pos;
+                } else if (block_event_start_ == std::string_view::npos) {
+                    // Continuation of an event that straddled chunk
+                    // boundaries: the block fast-path is gone, so this line
+                    // must accumulate line-by-line.
+                    event_bytes_ += line.size() + 1;
+                    if (event_bytes_ > kMaxSseEventBytes) {
+                        ok_ = false;
+                        return false;
+                    }
+                    if (!push_line(line, events)) {
+                        return false;
+                    }
+                }
+            }
+            pos = nl + 1;
         }
         return ok_;
     }
@@ -460,7 +660,7 @@ public:
             raw_event_.clear();
             event_open_ = false;
         }
-        line_.clear();
+        line_pending_.clear();
         return true;
     }
 
@@ -468,6 +668,15 @@ public:
     {
         std::string result = std::move(raw_event_);
         raw_event_.clear();
+        if (!line_pending_.empty()) {
+            // Trailing line without a terminating newline (e.g. a non-SSE JSON
+            // response that ends at EOF).  Flush it as the final event so the
+            // body isn't silently dropped.
+            if (!result.empty()) {
+                result.push_back('\n');
+            }
+            result += line_pending_.take(0);
+        }
         if (event_open_) {
             data_.clear();
             event_open_ = false;
@@ -476,10 +685,48 @@ public:
     }
 
 private:
-    bool push_line(std::vector<SseEvent> &out)
+    /// A complete event that lives wholly inside the current chunk: forward
+    /// it as a span when it is pure (no CR, no usage/model/message_stop/
+    /// [DONE]), otherwise assemble it through push_line so parsing and
+    /// done-detection stay identical.
+    void dispatch_block_event(std::string_view ev, std::vector<std::string_view> &forward_spans,
+                              std::vector<SseEvent> &events)
     {
-        std::string line;
-        line.swap(line_);
+        const bool clean = ev.find('\r') == std::string_view::npos;
+        const bool special =
+            ev.find("\"usage\"") != std::string_view::npos || ev.find("\"model\"") != std::string_view::npos ||
+            ev.find("message_stop") != std::string_view::npos ||
+            ev.find("response.completed") != std::string_view::npos || ev.find("[DONE]") != std::string_view::npos;
+        if (clean && !special) {
+            forward_spans.push_back(ev);
+            return;
+        }
+        flush_block_lines(ev, events);
+    }
+
+    /// Split an in-chunk event into lines and feed each through push_line
+    /// (accumulation path — data_/raw_event_/done semantics unchanged).
+    void flush_block_lines(std::string_view ev, std::vector<SseEvent> &events)
+    {
+        size_t p = 0;
+        while (p < ev.size()) {
+            const size_t nl = ev.find('\n', p);
+            const size_t end = nl == std::string_view::npos ? ev.size() : nl;
+            std::string_view line = ev.substr(p, end - p);
+            while (!line.empty() && line.back() == '\r')
+                line.remove_suffix(1);
+            if (!push_line(line, events)) {
+                return;
+            }
+            if (nl == std::string_view::npos) {
+                break;
+            }
+            p = nl + 1;
+        }
+    }
+
+    bool push_line(std::string_view line, std::vector<SseEvent> &out)
+    {
         if (line.empty()) {
             if (event_open_) {
                 raw_event_ += '\n';
@@ -487,19 +734,17 @@ private:
                 out.push_back(SseEvent{ std::move(data_), std::move(raw_event_), done });
                 raw_event_.clear();
                 data_.clear();
-                event_bytes_ = 0;
                 event_open_ = false;
             }
             return true;
         }
 
         event_open_ = true;
-        event_bytes_ += line.size() + 1;
-        if (event_bytes_ > kMaxSseEventBytes) {
-            ok_ = false;
-            return false;
-        }
-        raw_event_ += line;
+        // Reserve exactly what the line needs (plus a few bytes for the
+        // trailing '\n'): raw_event_ is built per event and cleared after,
+        // so a 40 KiB line never grows data_ past its content.
+        raw_event_.reserve(raw_event_.size() + line.size() + 1);
+        raw_event_.append(line.data(), line.size());
         raw_event_ += '\n';
         if (line[0] == ':') {
             return true;
@@ -507,9 +752,9 @@ private:
         const size_t colon = line.find(':');
         std::string_view field = line;
         std::string_view value;
-        if (colon != std::string::npos) {
-            field = std::string_view{ line }.substr(0, colon);
-            value = std::string_view{ line }.substr(colon + 1);
+        if (colon != std::string_view::npos) {
+            field = line.substr(0, colon);
+            value = line.substr(colon + 1);
             if (!value.empty() && value.front() == ' ') {
                 value.remove_prefix(1);
             }
@@ -518,15 +763,20 @@ private:
             if (!data_.empty()) {
                 data_.push_back('\n');
             }
+            // data_ mirrors the line's payload exactly: reserve what the
+            // value adds (plus the join newline) so a long line allocates
+            // once and never doubles past its content.
+            data_.reserve(data_.size() + value.size() + 1);
             data_.append(value.data(), value.size());
         }
         return true;
     }
 
-    size_t event_bytes_ = 0;
-    std::string line_;
+    ChainedLine line_pending_; // trailing line across chunk boundaries (8 KiB blocks)
     std::string data_;
     std::string raw_event_;
+    size_t event_bytes_ = 0;
+    size_t block_event_start_ = std::string_view::npos; // in-chunk event origin
     bool event_open_ = false;
     bool ok_ = true;
 };
@@ -579,22 +829,6 @@ std::optional<std::string> find_first_model(const json &value)
     return std::nullopt;
 }
 
-int poll_readable(int fd, int timeout_ms)
-{
-    pollfd pfd{};
-    pfd.fd = fd;
-    pfd.events = POLLIN | POLLERR | POLLHUP;
-    for (;;) {
-        const int rc = ::poll(&pfd, 1, timeout_ms);
-        if (rc >= 0) {
-            return rc;
-        }
-        if (errno != EINTR) {
-            return -1;
-        }
-    }
-}
-
 void handle_sse_event(const SseEvent &event, const std::chrono::steady_clock::time_point &started_at,
                       GatewayStreamPump &pump, Gateway &gateway)
 {
@@ -602,14 +836,29 @@ void handle_sse_event(const SseEvent &event, const std::chrono::steady_clock::ti
         pump.completed = true;
         return;
     }
-    auto doc = json::parse(trim_ascii(event.data));
-    if (!doc || !doc->is_object()) {
-        return;
-    }
     if (pump.first_token_latency_ms == 0) {
         pump.first_token_latency_ms = static_cast<int>(
             std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started_at)
                 .count());
+    }
+    // trim_ascii returns a std::string — hold it, do not bind a view to the
+    // temporary (the old binding was dangling and reads were garbage).
+    const std::string data = trim_ascii(event.data);
+
+    // Fast path: the vast majority of SSE events are pure deltas with no
+    // usage/model — forward them without json::parse (design doc §9).  Only
+    // events that mention "usage" or "model" are worth parsing.
+    if (data.find("\"usage\"") == std::string_view::npos && data.find("\"model\"") == std::string_view::npos) {
+        if (data.find("message_stop") != std::string_view::npos ||
+            data.find("response.completed") != std::string_view::npos) {
+            pump.completed = true;
+        }
+        return;
+    }
+
+    auto doc = json::parse(data);
+    if (!doc || !doc->is_object()) {
+        return;
     }
     const json &root = *doc;
     if (const auto type_str = root["type"].as_string(); type_str.has_value()) {
@@ -621,7 +870,14 @@ void handle_sse_event(const SseEvent &event, const std::chrono::steady_clock::ti
         pump.model = *model;
     }
     if (contains_usage_object(root)) {
-        gateway.finalize(*doc);
+        // finalize must never break the stream: a provider sending a sparse
+        // usage object is a billing-data problem, not a connection problem.
+        try {
+            gateway.finalize(*doc);
+        } catch (const std::exception &err) {
+            std::fprintf(stderr, "finalize failed (billing skipped): %s\n", err.what());
+            return;
+        }
         pump.saw_usage = true;
     }
 }
@@ -634,12 +890,92 @@ UpstreamRequest Gateway::make_upstream(bool stream) const
     return build_proxy_upstream_request(request, upstream_path());
 }
 
-void Gateway::fill_success_pricing(ProxyRequest &pr, const Channel &channel)
+std::string extract_requested_model(std::string_view body)
+{
+    if (body.empty()) {
+        return {};
+    }
+    // Full JSON body (httplib path) — exact top-level "model" field.
+    if (auto doc = json::parse(body); doc && doc->is_object()) {
+        if (const auto model = (*doc)["model"].as_string(); model.has_value() && !model->empty()) {
+            return *model;
+        }
+    }
+    // Truncated sliding-window prefix (Beast path): scan for the "model" key
+    // and its string value.  The caller validates the result against the
+    // channel model table, so a false positive inside message content is
+    // rejected rather than billed.
+    size_t pos = 0;
+    while ((pos = body.find("\"model\"", pos)) != std::string_view::npos) {
+        size_t i = pos + 7; // strlen("\"model\"")
+        while (i < body.size() && (body[i] == ' ' || body[i] == '\t'))
+            ++i;
+        if (i >= body.size() || body[i] != ':') {
+            pos += 7;
+            continue;
+        }
+        ++i;
+        while (i < body.size() && (body[i] == ' ' || body[i] == '\t'))
+            ++i;
+        if (i >= body.size() || body[i] != '"') {
+            pos += 7;
+            continue;
+        }
+        ++i;
+        std::string value;
+        bool closed = false;
+        while (i < body.size()) {
+            const char ch = body[i++];
+            if (ch == '\\') {
+                if (i < body.size())
+                    value.push_back(body[i++]);
+                continue;
+            }
+            if (ch == '"') {
+                closed = true;
+                break;
+            }
+            value.push_back(ch);
+        }
+        if (closed && !value.empty())
+            return value;
+        pos += 7;
+    }
+    return {};
+}
+
+/// Base success-path pricing, as a free function so it can be invoked from
+/// provider callbacks that outlive the Gateway object (the on_complete lambdas
+/// registered on httplib/Beast sinks run after the temporary Gateway is gone).
+void apply_success_pricing(ProxyRequest &pr, const Channel &channel)
 {
     pr.upstream.channel_multiplier = channel.price_multiplier;
+
+    // Billing uses the client-REQUESTED model, not the upstream response
+    // model: the upstream may rewrite the model (e.g. cc-switch maps a front
+    // model to a backend model), and the channel price table only knows the
+    // front model.  The requested model is extracted from the request body
+    // (full body on the httplib path, sliding-window peek on the Beast path)
+    // and validated against the channel table before overriding.
+    std::string body_copy;
+    std::string_view source = pr.http.body;
+    if (pr.http.body_source && pr.http.body_source->peek) {
+        body_copy = pr.http.body_source->peek();
+        source = body_copy;
+    }
+    std::string requested = extract_requested_model(source);
+    if (!requested.empty() && channel.find_model(requested)) {
+        pr.upstream.model_name = std::move(requested);
+    }
+
     if (const Model *model = channel.find_model(pr.upstream.model_name)) {
         fill_pricing_from_model(pr.upstream.pricing, *model);
     }
+}
+
+void Gateway::fill_success_pricing(ProxyRequest &pr, const Channel &channel)
+{
+    apply_success_pricing(pr, channel);
 }
 
 bool Gateway::should_bill_non_stream() const
@@ -707,7 +1043,8 @@ json Gateway::run()
         UpstreamResponse &resp = executed.result->response;
         const std::string response_id = upstream_response_id_from_headers(resp.headers);
         request.upstream.channel_id = channel.id;
-        request.upstream.model_name = parse_json_string_field(resp.body, "model").value_or("");
+        // model_name stays empty here — fill_success_pricing captures the
+        // client-requested model (the upstream may rewrite the response model).
         fill_success_pricing(request, channel);
         request.upstream.status_code = resp.status_code;
         request.upstream.response_id = response_id;
@@ -752,6 +1089,17 @@ void Gateway::run_stream(ResponseSink &res, const std::function<void(ProxyReques
         return;
     }
 
+    // Billing model: capture the client-requested model while the request
+    // body is still in memory — the body is released before the SSE pump,
+    // which outlives this call, and the upstream may rewrite the response
+    // model (e.g. cc-switch maps a front model to a backend model).
+    if (request.upstream.model_name.empty()) {
+        const std::string requested = extract_requested_model(request.http.body);
+        if (!requested.empty() && channel.find_model(requested)) {
+            request.upstream.model_name = requested;
+        }
+    }
+
     ScheduledUpstreamStreamExecution executed = open_scheduled_upstream_stream(channel.id, make_upstream(true));
     if (executed.result.has_value() && executed.result->status_code < 400) {
         UpstreamStreamResponse upstream = std::move(*executed.result);
@@ -769,8 +1117,17 @@ void Gateway::run_stream(ResponseSink &res, const std::function<void(ProxyReques
         request.http.body.clear();
         request.http.body.shrink_to_fit();
         const GatewayStreamKind stream_kind = kind();
+        // Extract headers into a standalone vector FIRST: apply_upstream_gateway_stream
+        // receives `upstream` by move, and parameter-initialization order is
+        // unspecified — a `upstream.headers` reference argument could alias the
+        // moved-from vector (observed empty headers).
+        std::vector<UpstreamHeader> stream_headers = std::move(upstream.headers);
+        // Must run BEFORE apply_upstream_gateway_stream: set_chunked_provider
+        // writes the response head synchronously, so any header set after the
+        // call never reaches the wire.
+        set_stream_correlation_headers(res, response_id);
         apply_upstream_gateway_stream(
-            res, status, upstream.headers, std::move(upstream), std::move(request),
+            res, status, std::move(stream_headers), std::move(upstream), std::move(request),
             [stream_kind](ProxyRequest &u) -> std::unique_ptr<Gateway> { return make_gateway(stream_kind, u); },
             [status, on_usage, channel_id, route_mult](ProxyRequest &u, const GatewayStreamResult &result) {
                 const GatewayStreamPump &pump = result.pump;
@@ -779,15 +1136,14 @@ void Gateway::run_stream(ResponseSink &res, const std::function<void(ProxyReques
                     return;
                 }
                 if (const auto channel = ChannelStore::instance().find_channel(channel_id); channel.has_value()) {
+                    // Free function — this callback runs after the Gateway
+                    // temporary is destroyed, so it must not capture `this`.
+                    apply_success_pricing(u, *channel);
                     u.upstream.channel_multiplier = route_mult;
-                    if (const Model *model = channel->find_model(u.upstream.model_name)) {
-                        fill_pricing_from_model(u.upstream.pricing, *model);
-                    }
                 }
                 u.upstream.first_token_latency_ms = pump.first_token_latency_ms;
                 on_usage(u);
             });
-        set_stream_correlation_headers(res, response_id);
         return;
     }
 
@@ -946,12 +1302,12 @@ void stream_gateway_session_to_httplib(ResponseSink &res, UpstreamSession sessio
     shared->channel_multiplier = route_group_multiplier;
     shared->on_complete = std::move(on_complete);
 
-    const int idle_timeout_ms = std::max(1000, config().proxy_upstream_timeout_seconds * 1000);
+    const int idle_timeout_ms = std::max(1000, config().proxy_upstream_idle_timeout_seconds * 1000);
     res.set_chunked_provider(content_type, [shared, idle_timeout_ms](ChunkedSink &sink) mutable {
         auto stream_gateway = make_gateway(shared->stream_kind, shared->usage);
         const GatewayStreamResult gateway_result = pump_gateway_stream(
             shared->session.stream.read, [&sink](std::string_view data) { return sink.write(data); },
-            shared->session.head.body, idle_timeout_ms, shared->session.stream.poll_fd, *stream_gateway);
+            shared->session.head.body, idle_timeout_ms, *stream_gateway);
         const int session_status = shared->session.head.status;
         shared->session.close_stream();
         if (shared->on_complete && gateway_result.pump.saw_usage && session_status < 400) {
@@ -974,9 +1330,9 @@ bool stream_gateway_session_to_client(UpstreamSession &session, const ClientWrit
         return false;
     }
     auto gateway = make_gateway(stream_kind, usage);
-    const int idle_timeout_ms = std::max(1000, config().proxy_upstream_timeout_seconds * 1000);
-    const GatewayStreamResult result = pump_gateway_stream(session.stream.read, write_client, session.head.body,
-                                                           idle_timeout_ms, session.stream.poll_fd, *gateway);
+    const int idle_timeout_ms = std::max(1000, config().proxy_upstream_idle_timeout_seconds * 1000);
+    const GatewayStreamResult result =
+        pump_gateway_stream(session.stream.read, write_client, session.head.body, idle_timeout_ms, *gateway);
     if (session.stream.close) {
         session.stream.close();
     }
@@ -990,6 +1346,111 @@ bool stream_gateway_session_to_client(UpstreamSession &session, const ClientWrit
 }
 
 } // namespace
+
+namespace
+{
+
+void write_json_error_to_writer(const ClientWriter &write_client, int status, std::string_view message)
+{
+    const std::string body = serialize(json{ { "error", json{ { "message", std::string{ message } } } } });
+    const std::string head = format_upstream_proxy_response_headers(
+        status, { { "Content-Type", "application/json; charset=utf-8" } }, body.size());
+    (void)write_client(head);
+    (void)write_client(body);
+}
+
+} // namespace
+
+void Gateway::run_stream_writer(const ClientWriter &write_client, const std::function<void(ProxyRequest &)> &on_usage)
+{
+    const auto started_at = Clock::now();
+
+    auto group = load_channel_group();
+    if (!group.has_value()) {
+        write_json_error_to_writer(write_client, 400, "channel group unavailable");
+        return;
+    }
+
+    Channel &channel = group->channels[static_cast<size_t>(group->pointer)];
+    if (!channel_ok(channel)) {
+        write_json_error_to_writer(write_client, 400, no_available_channel_message());
+        return;
+    }
+
+    const long long channel_id = channel.id;
+    const double route_mult = channel.price_multiplier;
+
+    ScheduledUpstreamStreamExecution executed = open_scheduled_upstream_stream(channel_id, make_upstream(true));
+    if (!executed.result.has_value()) {
+        const std::string detail = executed.transport_error.has_value() && !executed.transport_error->message.empty() ?
+                                       executed.transport_error->message :
+                                       "proxy upstream failed";
+        write_json_error_to_writer(write_client, 502, detail);
+        return;
+    }
+
+    UpstreamStreamResponse upstream = std::move(*executed.result);
+    const int status = upstream.status_code;
+    const std::string response_id = upstream_response_id_from_headers(upstream.headers);
+    request.upstream.channel_id = channel_id;
+    request.upstream.status_code = status;
+    request.upstream.channel_multiplier = route_mult;
+    request.upstream.response_id = response_id;
+    request.is_stream = true;
+    request.http.body.clear();
+    request.http.body.shrink_to_fit();
+
+    const std::string content_type = content_type_from_headers(upstream.headers);
+    if (status >= 400 || !is_sse_content_type(content_type)) {
+        std::string body = std::move(upstream.initial_body);
+        body += read_remaining_stream(upstream.stream);
+        if (upstream.stream.close) {
+            upstream.stream.close();
+        }
+        std::vector<UpstreamHeader> headers;
+        if (!response_id.empty()) {
+            headers.push_back({ "X-Response-Id", response_id });
+        }
+        headers.push_back({ "Content-Type", content_type.empty() ? "application/json; charset=utf-8" : content_type });
+        const std::string head = format_upstream_proxy_response_headers(status, headers, body.size());
+        (void)write_client(head);
+        (void)write_client(body);
+        return;
+    }
+
+    // SSE: write the response head, then pump upstream events to the client.
+    std::vector<UpstreamHeader> head_headers;
+    if (!response_id.empty()) {
+        head_headers.push_back({ "X-Response-Id", response_id });
+    }
+    if (!write_client(build_synthetic_stream_response_head(status, content_type, head_headers))) {
+        if (upstream.stream.close) {
+            upstream.stream.close();
+        }
+        return;
+    }
+
+    auto gateway = make_gateway(kind(), request);
+    const int idle_timeout_ms = std::max(1000, config().proxy_upstream_idle_timeout_seconds * 1000);
+    GatewayStreamResult result =
+        pump_gateway_stream(upstream.stream.read, write_client, upstream.initial_body, idle_timeout_ms, *gateway);
+    if (upstream.stream.close) {
+        upstream.stream.close();
+    }
+
+    const GatewayStreamPump &pump = result.pump;
+    const bool success = status < 400 && pump.completed && !pump.upstream_error && !pump.idle_timeout;
+    if (!on_usage || !success || !pump.saw_usage) {
+        return;
+    }
+    fill_success_pricing(request, channel);
+    request.upstream.latency_ms =
+        static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started_at).count());
+    request.upstream.first_token_latency_ms =
+        std::min(std::max(pump.first_token_latency_ms, 0), std::max(request.upstream.latency_ms, 0));
+    request.upstream.channel_multiplier = route_mult;
+    on_usage(request);
+}
 
 Gateway::HandleResult Gateway::handle(ResponseSink &res)
 {
@@ -1036,6 +1497,16 @@ Gateway::HandleResult Gateway::handle(ResponseSink &res, const StreamOptions &op
 
         const long long channel_id = channel.id;
         const double route_mult = channel.price_multiplier;
+
+        // Billing model: capture the client-requested model while the local
+        // `body` copy is alive — `request.http.body` is released below and
+        // the upstream may rewrite the response model.
+        if (request.upstream.model_name.empty()) {
+            const std::string requested = extract_requested_model(body);
+            if (!requested.empty() && channel.find_model(requested)) {
+                request.upstream.model_name = requested;
+            }
+        }
 
         // Temporarily restore body for make_upstream (chat-style builders read request.http.body).
         request.http.body = body;
@@ -1091,15 +1562,28 @@ Gateway::HandleResult Gateway::handle(ResponseSink &res, const StreamOptions &op
             };
             if (options.stream_response != nullptr) {
                 ProxyRequest stream_usage = request;
-                stream_gateway_session_to_httplib(*options.stream_response, std::move(session), std::move(stream_usage),
-                                                  stream_kind, route_mult,
-                                                  [&](ProxyRequest &stream_request, int first_token_latency_ms) {
-                                                      if (stream_status >= 400 || !options.on_usage) {
-                                                          return;
-                                                      }
-                                                      finish_stream_billing(stream_request, first_token_latency_ms);
-                                                      options.on_usage(stream_request);
-                                                  });
+                // This callback runs inside the chunked provider, which
+                // httplib invokes AFTER the handler returns — the Gateway
+                // temporary and handle() locals are gone.  Capture everything
+                // by value and look the channel up again.
+                stream_gateway_session_to_httplib(
+                    *options.stream_response, std::move(session), std::move(stream_usage), stream_kind, route_mult,
+                    [channel_id, route_mult, stream_status, request_started_at,
+                     on_usage = options.on_usage](ProxyRequest &stream_request, int first_token_latency_ms) mutable {
+                        if (stream_status >= 400 || !on_usage) {
+                            return;
+                        }
+                        if (const auto ch = ChannelStore::instance().find_channel(channel_id); ch.has_value()) {
+                            apply_success_pricing(stream_request, *ch);
+                            stream_request.upstream.channel_multiplier = route_mult;
+                        }
+                        stream_request.upstream.latency_ms = static_cast<int>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - request_started_at)
+                                .count());
+                        stream_request.upstream.first_token_latency_ms = std::min(
+                            std::max(first_token_latency_ms, 0), std::max(stream_request.upstream.latency_ms, 0));
+                        on_usage(stream_request);
+                    });
                 return HandleResult{
                     .handled_stream = true,
                     .stream_status = stream_status,
@@ -1176,13 +1660,13 @@ void parse_billing_request_from_body(ProxyRequest &pr, GatewayStreamKind kind, s
     gateway->finalize(*doc);
 }
 
-GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size_t)> &read_chunk,
+GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size_t, int idle_timeout_ms)> &read_chunk,
                                         const std::function<bool(std::string_view)> &write_to_client,
-                                        std::string_view initial_body, int idle_timeout_ms, int poll_fd,
-                                        Gateway &gateway)
+                                        std::string_view initial_body, int idle_timeout_ms, Gateway &gateway)
 {
     GatewayStreamResult out;
     SseReader reader;
+    std::vector<std::string_view> forward_spans;
     std::vector<SseEvent> events;
     events.reserve(8);
     std::string pending_send;
@@ -1191,10 +1675,28 @@ GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size
 
     auto ingest = [&](std::string_view bytes) -> bool {
         out.pump.response_bytes += bytes.size();
+        forward_spans.clear();
         events.clear();
-        if (!reader.consume(bytes, events)) {
+        if (!reader.consume(bytes, forward_spans, events)) {
             out.pump.upstream_error = true;
             return false;
+        }
+        // Zero-copy path (design doc §9): complete pure events are written
+        // straight from the upstream buffer as string_views — no line_,
+        // no raw_event_, no json::parse, no copies.
+        for (const std::string_view span : forward_spans) {
+            if (out.pump.client_disconnected)
+                break;
+            if (!pending_send.empty()) {
+                if (!write_to_client(pending_send)) {
+                    out.pump.client_disconnected = true;
+                    break;
+                }
+                pending_send.clear();
+            }
+            if (!write_to_client(span)) {
+                out.pump.client_disconnected = true;
+            }
         }
         for (const SseEvent &event : events) {
             handle_sse_event(event, started_at, out.pump, gateway);
@@ -1233,33 +1735,21 @@ GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size
 
     char buffer[8192];
     for (;;) {
-        if (poll_fd >= 0) {
-            const int timeout_ms = out.pump.client_disconnected ? kDisconnectDrainTimeoutMs : idle_timeout_ms;
-            const int polled = poll_readable(poll_fd, timeout_ms);
-            if (polled == 0) {
-                if (!out.pump.client_disconnected) {
-                    out.pump.idle_timeout = true;
-                }
-                break;
-            }
-            if (polled < 0) {
-                out.pump.upstream_error = true;
-                break;
-            }
-        }
-
-        const ssize_t n = read_chunk(buffer, sizeof(buffer));
+        const ssize_t n = read_chunk(buffer, sizeof(buffer), idle_timeout_ms);
         if (n == 0) {
             break;
         }
         if (n < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ETIMEDOUT) {
+            // ETIMEDOUT = no response bytes within the inter-event idle window
+            // (the read itself drives curl; the idle window only starts after
+            // the request body has been fully sent).
+            if (errno == ETIMEDOUT || errno == EAGAIN || errno == EWOULDBLOCK) {
                 if (!out.pump.client_disconnected) {
                     out.pump.idle_timeout = true;
                 }
-                break;
+            } else {
+                out.pump.upstream_error = true;
             }
-            out.pump.upstream_error = true;
             break;
         }
         if (!ingest(std::string_view{ buffer, static_cast<size_t>(n) })) {
@@ -1286,7 +1776,7 @@ GatewayStreamResult pump_gateway_stream(const std::function<ssize_t(char *, size
     return out;
 }
 
-void apply_upstream_gateway_stream(ResponseSink &res, int status, const std::vector<UpstreamHeader> &headers,
+void apply_upstream_gateway_stream(ResponseSink &res, int status, std::vector<UpstreamHeader> headers,
                                    UpstreamStreamResponse upstream, ProxyRequest usage,
                                    std::function<std::unique_ptr<Gateway>(ProxyRequest &)> make_gateway_for_usage,
                                    std::function<void(ProxyRequest &usage, const GatewayStreamResult &)> on_complete)
@@ -1315,7 +1805,7 @@ void apply_upstream_gateway_stream(ResponseSink &res, int status, const std::vec
     shared->upstream = std::move(upstream);
     shared->usage = std::move(usage);
     shared->gateway = make_gateway_for_usage(shared->usage);
-    shared->idle_timeout_ms = std::max(1000, config().proxy_upstream_timeout_seconds * 1000);
+    shared->idle_timeout_ms = std::max(1000, config().proxy_upstream_idle_timeout_seconds * 1000);
     shared->on_complete = std::move(on_complete);
 
     res.set_chunked_provider(content_type, [shared](ChunkedSink &sink) mutable {
@@ -1324,8 +1814,7 @@ void apply_upstream_gateway_stream(ResponseSink &res, int status, const std::vec
             auto tracked_write = [&sink](std::string_view data) { return sink.write(data); };
             if (shared->gateway) {
                 result = pump_gateway_stream(shared->upstream.stream.read, tracked_write, shared->upstream.initial_body,
-                                             shared->idle_timeout_ms, shared->upstream.stream.poll_fd,
-                                             *shared->gateway);
+                                             shared->idle_timeout_ms, *shared->gateway);
             } else {
                 auto write = [&tracked_write, &result](std::string_view data) {
                     result.pump.response_bytes += data.size();
@@ -1336,7 +1825,7 @@ void apply_upstream_gateway_stream(ResponseSink &res, int status, const std::vec
                 }
                 char buffer[8192];
                 for (;;) {
-                    const ssize_t n = shared->upstream.stream.read(buffer, sizeof(buffer));
+                    const ssize_t n = shared->upstream.stream.read(buffer, sizeof(buffer), shared->idle_timeout_ms);
                     if (n <= 0) {
                         break;
                     }
