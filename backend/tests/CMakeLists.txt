@@ -27,7 +27,7 @@ endforeach()
 # are interactive tools that talk to real upstreams, not assertions.
 # ---------------------------------------------------------------------------
 
-option(REVLM_BUILD_PROBES "Build the long-running measurement probes" ON)
+option(REVLM_BUILD_PROBES "Build the long-running measurement probes" OFF)
 
 function(revlm_add_probe probe_cpp)
   get_filename_component(probe_basename "${probe_cpp}" NAME_WE)

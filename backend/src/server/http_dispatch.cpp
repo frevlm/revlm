@@ -244,7 +244,8 @@ make_response_handler(std::function<json(const ::httplib::Request &, RequestCont
     return make_http_handler(
         [handler = std::move(handler)](const ::httplib::Request &req, ::httplib::Response &res, RequestContext &ctx) {
             HttplibResponseSink sink(res);
-            write_json(sink, 200, handler(req, ctx), ctx.set_cookie);
+            json body = handler(req, ctx);
+            write_json(sink, 200, std::move(body), ctx.set_cookie);
         });
 }
 

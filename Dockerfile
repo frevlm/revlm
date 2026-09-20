@@ -11,7 +11,7 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       ca-certificates curl git cmake g++ make pkg-config \
       libssl-dev libcpp-httplib-dev \
-      libboost-json-dev libboost-url-dev \
+      libboost-json-dev libboost-url-dev libboost-random-dev \
       default-libmysqlclient-dev && \
     rm -rf /var/lib/apt/lists/* && \
     # MariaDB-only trees folded MYSQL_TIME into mysql.h; ODB still #includes mysql_time.h.
@@ -76,7 +76,11 @@ RUN which g++ && which make && g++ --version && \
     done && \
     strip /out/revlm
 
-FROM --platform=$TARGETPLATFORM gcr.io/distroless/cc-debian13:nonroot@sha256:d97bc0a941b8d4be647dc0ee75b264ddbb772f1ac5ba690a4309c00723b23775
+FROM --platform=$TARGETPLATFORM ubuntu:24.04 AS runtime
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    useradd --system --uid 65532 --no-create-home nonroot
 WORKDIR /
 COPY --from=build /out/revlm /revlm
 COPY --from=build /out/usr/lib /usr/lib

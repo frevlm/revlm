@@ -24,6 +24,16 @@ public:
 
     using boost::json::value::value;
 
+    json(const boost::json::value &other)
+        : boost::json::value(other)
+    {
+    }
+
+    json(boost::json::value &&other)
+        : boost::json::value(std::move(other))
+    {
+    }
+
     json(std::nullptr_t)
         : boost::json::value(nullptr)
     {
@@ -211,6 +221,16 @@ public:
         return std::nullopt;
     }
 };
+
+inline void tag_invoke(const boost::json::value_from_tag &, boost::json::value &jv, const json &j)
+{
+    jv = static_cast<const boost::json::value &>(j);
+}
+
+inline void tag_invoke(const boost::json::value_from_tag &, boost::json::value &jv, json &&j)
+{
+    jv = static_cast<boost::json::value &&>(std::move(j));
+}
 
 inline std::string serialize(const json &v)
 {
