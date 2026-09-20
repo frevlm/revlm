@@ -1,7 +1,10 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useState, type FormEvent } from 'react';
+
+import { useQueryClient } from '@tanstack/react-query';
 
 import { useAuth } from '../../auth/AuthContext';
-import { deleteAdminUser, listAdminUsers, updateAdminUser, type AdminUser } from '../../api/admin/users';
+import { type AdminUser } from '../../api/admin/users';
+import { useDeleteUser, useUpdateUser, useUsers, userKeys } from '../../data/users';
 import { BootstrapModal } from '../../components/BootstrapModal';
 import { DividedStack } from '../../components/DividedStack';
 import { SegmentedFrame } from '../../components/SegmentedFrame';
@@ -24,48 +27,140 @@ function statusBadge(status: number): { cls: string; label: string } {
   return { cls: 'badge rounded-pill bg-secondary bg-opacity-10 text-secondary px-2', label: '禁用' };
 }
 
-export function UsersPage() {
-  const { user: self } = useAuth();
-  const selfID = self?.id || 0;
+type EditDraft = { email: string; role: 'user' | 'root'; status: number };
 
-  const [users, setUsers] = useState<AdminUser[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState('');
-  const [notice, setNotice] = useState('');
+function draftFromUser(user: AdminUser): EditDraft {
+  return {
+    email: user.email || '',
+    role: (user.role || 'user') as 'user' | 'root',
+    status: user.status || 0,
+  };
+}
 
-  const [editing, setEditing] = useState<AdminUser | null>(null);
-  const [editEmail, setEditEmail] = useState('');
-  const [editRole, setEditRole] = useState<'user' | 'root'>('user');
-  const [editStatus, setEditStatus] = useState(1);
+/**
+ * Seeded once per mount from `user`; the caller keys this on `user.id`, so
+ * opening a different row's edit modal remounts it with a fresh draft instead
+ * of needing an effect to resync one shared draft object.
+ */
+function EditUserForm({
+  user,
+  selfID,
+  onSubmitStart,
+  onError,
+  onSaved,
+}: {
+  user: AdminUser;
+  selfID: number;
+  onSubmitStart: () => void;
+  onError: (message: string) => void;
+  onSaved: () => void;
+}) {
+  const [draft, setDraft] = useState<EditDraft>(() => draftFromUser(user));
+  const updateUser = useUpdateUser();
 
-  const enabledCount = useMemo(() => users.filter((u) => u.status === 1).length, [users]);
-
-  async function refresh() {
-    setErr('');
-    setNotice('');
-    setLoading(true);
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault();
+    onSubmitStart();
     try {
-      const usersRes = await listAdminUsers();
-      if (!usersRes.success) throw new Error(usersRes.message || '加载用户失败');
-      setUsers(usersRes.data || []);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : '加载失败');
-      setUsers([]);
-    } finally {
-      setLoading(false);
+      await updateUser.mutateAsync({
+        userID: user.id,
+        req: { email: draft.email.trim(), role: draft.role, status: draft.status },
+      });
+      onSaved();
+    } catch (error) {
+      onError(error instanceof Error ? error.message : '保存失败');
     }
   }
 
-  useEffect(() => {
-    void refresh();
-  }, []);
+  return (
+    <form className="row g-3" onSubmit={(e) => void handleSubmit(e)}>
+      <div className="col-md-6">
+        <label className="form-label">邮箱</label>
+        <input
+          className="form-control"
+          value={draft.email}
+          onChange={(e) => setDraft((prev) => ({ ...prev, email: e.target.value }))}
+          required
+        />
+        <div className="form-text small text-muted">修改邮箱后，新邮箱会立即用于后续登录。</div>
+      </div>
+      <div className="col-md-6">
+        <label className="form-label">账号名</label>
+        <input className="form-control" value={user.username || ''} disabled />
+        <div className="form-text small text-muted">账号名不可修改；用于登录（区分大小写，仅字母/数字）。</div>
+      </div>
+      <div className="col-md-6">
+        <label className="form-label">状态</label>
+        <select
+          className="form-select"
+          value={draft.status}
+          onChange={(e) => setDraft((prev) => ({ ...prev, status: Number.parseInt(e.target.value, 10) || 0 }))}
+          disabled={user.id === selfID}
+        >
+          <option value={1}>启用</option>
+          <option value={0}>禁用</option>
+        </select>
+      </div>
+      <div className="col-md-6">
+        <label className="form-label">角色</label>
+        <select
+          className="form-select"
+          value={draft.role}
+          onChange={(e) => setDraft((prev) => ({ ...prev, role: (e.target.value as 'user' | 'root') || 'user' }))}
+          disabled={user.id === selfID}
+        >
+          <option value="user">普通用户</option>
+          <option value="root">超级管理员</option>
+        </select>
+        {user.id === selfID ? (
+          <div className="form-text small text-muted">不能修改当前登录用户的状态或角色。</div>
+        ) : null}
+      </div>
+      <div className="modal-footer border-top-0 px-0 pb-0">
+        <button type="button" className="btn btn-light" data-bs-dismiss="modal">
+          取消
+        </button>
+        <button className="btn btn-primary px-4" type="submit">
+          确认更改
+        </button>
+      </div>
+    </form>
+  );
+}
 
-  useEffect(() => {
-    if (!editing) return;
-    setEditEmail(editing.email || '');
-    setEditRole((editing.role || 'user') as 'user' | 'root');
-    setEditStatus(editing.status || 0);
-  }, [editing]);
+export function UsersPage() {
+  const { user: self } = useAuth();
+  const selfID = self?.id || 0;
+  const queryClient = useQueryClient();
+
+  const { data } = useUsers();
+  const users = data ?? [];
+  const deleteUser = useDeleteUser();
+
+  const [err, setErr] = useState('');
+  const [notice, setNotice] = useState('');
+  const [editingID, setEditingID] = useState<number | null>(null);
+  const editing = users.find((u) => u.id === editingID) ?? null;
+
+  const enabledCount = users.filter((u) => u.status === 1).length;
+
+  function clearBanners() {
+    setErr('');
+    setNotice('');
+  }
+
+  async function handleDelete(u: AdminUser) {
+    if (u.id === selfID) return;
+    if (!window.confirm('确认删除该用户？此操作不可恢复。')) return;
+    clearBanners();
+    try {
+      await deleteUser.mutateAsync(u.id);
+      setNotice('已删除');
+      if (editingID === u.id) setEditingID(null);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : '删除失败');
+    }
+  }
 
   return (
     <div className="fade-in-up">
@@ -115,9 +210,7 @@ export function UsersPage() {
             </div>
           ) : null}
 
-          {loading ? (
-            <div className="text-muted">加载中…</div>
-          ) : users.length === 0 ? (
+          {users.length === 0 ? (
             <div className="text-center py-5 text-muted">
               <span className="fs-1 d-block mb-3 material-symbols-rounded">inbox</span>
               暂无用户。
@@ -166,7 +259,7 @@ export function UsersPage() {
                                 title="加余额"
                                 data-bs-toggle="modal"
                                 data-bs-target="#addBalanceModal"
-                                onClick={() => setEditing(u)}
+                                onClick={() => setEditingID(u.id)}
                               >
                                 <i className="ri-money-dollar-circle-line"></i>
                               </button>
@@ -176,7 +269,7 @@ export function UsersPage() {
                                 title="编辑用户"
                                 data-bs-toggle="modal"
                                 data-bs-target="#editUserModal"
-                                onClick={() => setEditing(u)}
+                                onClick={() => setEditingID(u.id)}
                               >
                                 <i className="ri-edit-line"></i>
                               </button>
@@ -186,7 +279,7 @@ export function UsersPage() {
                                 title="重置密码"
                                 data-bs-toggle="modal"
                                 data-bs-target="#resetPasswordModal"
-                                onClick={() => setEditing(u)}
+                                onClick={() => setEditingID(u.id)}
                               >
                                 <i className="ri-key-2-line"></i>
                               </button>
@@ -195,21 +288,7 @@ export function UsersPage() {
                                 className="btn btn-sm btn-light border text-danger"
                                 title={u.id === selfID ? '不能删除当前登录用户' : '删除用户'}
                                 disabled={u.id === selfID}
-                                onClick={async () => {
-                                  if (u.id === selfID) return;
-                                  if (!window.confirm('确认删除该用户？此操作不可恢复。')) return;
-                                  setErr('');
-                                  setNotice('');
-                                  try {
-                                    const res = await deleteAdminUser(u.id);
-                                    if (!res.success) throw new Error(res.message || '删除失败');
-                                    setNotice('已删除');
-                                    if (editing?.id === u.id) setEditing(null);
-                                    await refresh();
-                                  } catch (e) {
-                                    setErr(e instanceof Error ? e.message : '删除失败');
-                                  }
-                                }}
+                                onClick={() => void handleDelete(u)}
                               >
                                 <i className="ri-delete-bin-line"></i>
                               </button>
@@ -229,15 +308,12 @@ export function UsersPage() {
       <BootstrapModal id="createUserModal" title="创建用户" dialogClassName="modal-dialog-centered modal-lg">
         <ConfigForm
           template={createAdminUserTemplate}
-          onSubmitStart={() => {
-            setErr('');
-            setNotice('');
-          }}
+          onSubmitStart={clearBanners}
           onError={(message) => setErr(message || '创建失败')}
-          onSaved={async () => {
+          onSaved={() => {
             setNotice('已创建');
             closeModalById('createUserModal');
-            await refresh();
+            void queryClient.invalidateQueries({ queryKey: userKeys.all });
           }}
           resetOnSaved
           submitClassName="btn btn-primary px-4"
@@ -254,85 +330,23 @@ export function UsersPage() {
         title={editing ? `编辑用户：${editing.email}` : '编辑用户'}
         dialogClassName="modal-dialog-centered modal-lg"
         onHidden={() => {
-          setEditing(null);
+          setEditingID(null);
         }}
       >
         {!editing ? (
           <div className="text-muted">未选择用户。</div>
         ) : (
-          <form
-            className="row g-3"
-            onSubmit={async (e) => {
-              e.preventDefault();
-              if (!editing) return;
-              setErr('');
-              setNotice('');
-              try {
-                const res = await updateAdminUser(editing.id, {
-                  email: editEmail.trim(),
-                  role: editRole,
-                  status: editStatus,
-                });
-                if (!res.success) throw new Error(res.message || '保存失败');
-                setNotice('已保存');
-                closeModalById('editUserModal');
-                await refresh();
-              } catch (e) {
-                setErr(e instanceof Error ? e.message : '保存失败');
-              }
+          <EditUserForm
+            key={editing.id}
+            user={editing}
+            selfID={selfID}
+            onSubmitStart={clearBanners}
+            onError={setErr}
+            onSaved={() => {
+              setNotice('已保存');
+              closeModalById('editUserModal');
             }}
-          >
-            <div className="col-md-6">
-              <label className="form-label">邮箱</label>
-              <input
-                className="form-control"
-                value={editEmail}
-                onChange={(e) => setEditEmail(e.target.value)}
-                required
-              />
-              <div className="form-text small text-muted">修改邮箱后，新邮箱会立即用于后续登录。</div>
-            </div>
-            <div className="col-md-6">
-              <label className="form-label">账号名</label>
-              <input className="form-control" value={editing.username || ''} disabled />
-              <div className="form-text small text-muted">账号名不可修改；用于登录（区分大小写，仅字母/数字）。</div>
-            </div>
-            <div className="col-md-6">
-              <label className="form-label">状态</label>
-              <select
-                className="form-select"
-                value={editStatus}
-                onChange={(e) => setEditStatus(Number.parseInt(e.target.value, 10) || 0)}
-                disabled={editing.id === selfID}
-              >
-                <option value={1}>启用</option>
-                <option value={0}>禁用</option>
-              </select>
-            </div>
-            <div className="col-md-6">
-              <label className="form-label">角色</label>
-              <select
-                className="form-select"
-                value={editRole}
-                onChange={(e) => setEditRole((e.target.value as 'user' | 'root') || 'user')}
-                disabled={editing.id === selfID}
-              >
-                <option value="user">普通用户</option>
-                <option value="root">超级管理员</option>
-              </select>
-              {editing.id === selfID ? (
-                <div className="form-text small text-muted">不能修改当前登录用户的状态或角色。</div>
-              ) : null}
-            </div>
-            <div className="modal-footer border-top-0 px-0 pb-0">
-              <button type="button" className="btn btn-light" data-bs-dismiss="modal">
-                取消
-              </button>
-              <button className="btn btn-primary px-4" type="submit">
-                确认更改
-              </button>
-            </div>
-          </form>
+          />
         )}
       </BootstrapModal>
 
@@ -341,7 +355,7 @@ export function UsersPage() {
         title={editing ? `加余额：${editing.email}` : '加余额'}
         dialogClassName="modal-dialog-centered"
         onHidden={() => {
-          setEditing(null);
+          setEditingID(null);
         }}
       >
         {!editing ? (
@@ -356,15 +370,12 @@ export function UsersPage() {
             </div>
             <ConfigForm
               template={addAdminUserBalanceTemplate(editing.id)}
-              onSubmitStart={() => {
-                setErr('');
-                setNotice('');
-              }}
+              onSubmitStart={clearBanners}
               onError={(message) => setErr(message || '加余额失败')}
-              onSaved={async () => {
+              onSaved={() => {
                 setNotice('已加余额');
                 closeModalById('addBalanceModal');
-                await refresh();
+                void queryClient.invalidateQueries({ queryKey: userKeys.all });
               }}
               submitClassName="btn btn-success px-4"
               footerStart={
@@ -382,7 +393,7 @@ export function UsersPage() {
         title={editing ? `重置密码：${editing.email}` : '重置密码'}
         dialogClassName="modal-dialog-centered"
         onHidden={() => {
-          setEditing(null);
+          setEditingID(null);
         }}
       >
         {!editing ? (
@@ -391,15 +402,12 @@ export function UsersPage() {
           <>
             <ConfigForm
               template={resetAdminUserPasswordTemplate(editing.id)}
-              onSubmitStart={() => {
-                setErr('');
-                setNotice('');
-              }}
+              onSubmitStart={clearBanners}
               onError={(message) => setErr(message || '重置失败')}
-              onSaved={async () => {
+              onSaved={() => {
                 setNotice('已重置密码');
                 closeModalById('resetPasswordModal');
-                await refresh();
+                void queryClient.invalidateQueries({ queryKey: userKeys.all });
               }}
               submitClassName="btn btn-primary px-4"
               footerStart={

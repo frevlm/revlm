@@ -7,6 +7,7 @@ export type AdminChannelGroup = {
   description?: string | null;
   price_multiplier: number;
   status: boolean;
+  type?: string;
   is_default?: boolean;
   pointer_channel_id?: number;
   pointer_channel_name?: string | null;
@@ -53,11 +54,12 @@ export async function listAdminChannelGroups() {
   return res.data;
 }
 
-type CreateAdminChannelGroupRequest = {
+export type CreateAdminChannelGroupRequest = {
   name?: string;
   description?: string | null;
   price_multiplier?: number;
   status?: boolean;
+  type?: string;
 };
 
 export async function createAdminChannelGroup(req: CreateAdminChannelGroupRequest) {
@@ -80,11 +82,12 @@ export async function upsertAdminChannelGroupPointer(groupID: number, req: { cha
   return res.data;
 }
 
-type UpdateAdminChannelGroupRequest = {
+export type UpdateAdminChannelGroupRequest = {
   name?: string;
   description?: string | null;
   price_multiplier?: number;
   status?: boolean;
+  type?: string;
 };
 
 export async function updateAdminChannelGroup(groupID: number, req: UpdateAdminChannelGroupRequest) {

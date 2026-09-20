@@ -1,220 +1,132 @@
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 
 import { useAuth } from '../../auth/AuthContext';
-import {
-  getAdminUsageEventDetail,
-  getAdminUsagePage,
-  type AdminUsagePage,
-  type UsageEventDetail,
-} from '../../api/admin/usage';
+import type { UsageEventDetail } from '../../api/admin/usage';
 import { SegmentedFrame } from '../../components/SegmentedFrame';
 import type { UsageAdvancedFiltersDropdownHandle } from '../../components/UsageAdvancedFiltersDropdown';
+import {
+  useAdminUsageEventDetail,
+  useAdminUsageEvents,
+  useAdminUsageSummary,
+  type AdminUsageCursor,
+  type AdminUsageFilters,
+} from '../../data/usageAdmin';
 import { UsageAdminEventsCard } from './usage/UsageAdminEventsCard';
 import { UsageAdminFilterBar } from './usage/UsageAdminFilterBar';
 import { UsageAdminSummaryCard } from './usage/UsageAdminSummaryCard';
 import { UsageAdminTopUsersCard } from './usage/UsageAdminTopUsersCard';
-import { buildAdminUsagePageParams, type UsageAdminCursorOverride } from './usage/usageAdminUtils';
+
+function defaultFilters(): AdminUsageFilters {
+  return {
+    start: '',
+    end: '',
+    allTime: false,
+    limit: 50,
+    filterUser: '',
+    filterUserID: undefined,
+    filterChannel: '',
+    filterChannelID: undefined,
+    filterModel: '',
+    filterModelExact: undefined,
+  };
+}
 
 export function UsageAdminPage() {
   useAuth();
 
-  const [data, setData] = useState<AdminUsagePage | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState('');
-
-  const [start, setStart] = useState('');
-  const [end, setEnd] = useState('');
-  const [allTime, setAllTime] = useState(false);
-  const [limit, setLimit] = useState(50);
-  const [beforeID, setBeforeID] = useState<number | undefined>(undefined);
-  const [afterID, setAfterID] = useState<number | undefined>(undefined);
-  const [filterUser, setFilterUser] = useState('');
-  const [filterUserID, setFilterUserID] = useState<number | undefined>(undefined);
-  const [filterChannel, setFilterChannel] = useState('');
-  const [filterModel, setFilterModel] = useState('');
-  const [filterChannelID, setFilterChannelID] = useState<number | undefined>(undefined);
-  const [filterModelExact, setFilterModelExact] = useState<string | undefined>(undefined);
+  // `draft` is what the filter bar displays; `applied` drives the summary query
+  // below and only advances on 更新/重置 — the same "changes stage until you click
+  // 更新" behavior this page had before the data layer existed. Paging leaves both
+  // alone and only moves `cursor`.
+  const [draft, setDraft] = useState<AdminUsageFilters>(defaultFilters);
+  const [applied, setApplied] = useState<AdminUsageFilters>(defaultFilters);
+  const [cursor, setCursor] = useState<AdminUsageCursor>({});
   const advRef = useRef<UsageAdvancedFiltersDropdownHandle | null>(null);
 
   const [expandedID, setExpandedID] = useState<number | null>(null);
-  const [detailByEventID, setDetailByEventID] = useState<Record<number, UsageEventDetail>>({});
-  const [detailLoadingID, setDetailLoadingID] = useState<number | null>(null);
 
-  async function refresh(opts?: {
-    keepCursor?: boolean;
-    override?: Parameters<typeof buildAdminUsagePageParams>[1];
-    cursor?: UsageAdminCursorOverride;
-  }) {
-    setErr('');
-    setLoading(true);
-    try {
-      const { params, allTimeActive, startValue, endValue } = buildAdminUsagePageParams(
-        {
-          start,
-          end,
-          allTime,
-          limit,
-          beforeID,
-          afterID,
-          filterUser,
-          filterUserID,
-          filterChannel,
-          filterChannelID,
-          filterModel,
-          filterModelExact,
-        },
-        opts?.override,
-        opts?.keepCursor,
-        opts?.cursor
-      );
+  const cursorActive = cursor.beforeID !== undefined || cursor.afterID !== undefined;
 
-      const res = await getAdminUsagePage(params);
-      if (!res.success) throw new Error(res.message || '加载失败');
-      const nextData = res.data || null;
-      setData((prev) => {
-        if (!nextData) return null;
-        if (params.summary === false) {
-          return {
-            ...nextData,
-            window: nextData.window ?? prev?.window,
-            top_users: nextData.top_users ?? prev?.top_users ?? [],
-          };
-        }
-        return nextData;
-      });
-      if (nextData && !allTimeActive) {
-        if (!startValue) setStart(nextData.start || '');
-        if (!endValue) setEnd(nextData.end || '');
-      }
-    } catch (error) {
-      setErr(error instanceof Error ? error.message : '加载失败');
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  }
+  const summary = useAdminUsageSummary(applied);
+  const events = useAdminUsageEvents(applied, cursor);
+  const detail = useAdminUsageEventDetail(expandedID);
 
-  useEffect(() => {
-    void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Paging only ever refetches events (see useAdminUsageEvents): window and
+  // top_users keep showing whatever `summary` last resolved, exactly like the
+  // old code's manual `prev?.window ?? nextData.window` merge, but for free —
+  // there is no merge because there is only ever one query that owns them.
+  const page = cursorActive ? events.data : summary.data;
+  const windowStats = summary.data?.window;
+  const topUsers = summary.data?.top_users ?? [];
+  const eventList = page?.events ?? [];
+  const canPrev = !!page?.prev_after_id;
+  const canNext = !!page?.next_before_id;
+  const loading = summary.isFetching || events.isFetching;
+  const err = summary.error?.message || events.error?.message || '';
 
-  const windowStats = data?.window;
-  const topUsers = data?.top_users || [];
-  const events = data?.events || [];
-  const canPrev = typeof data?.prev_after_id === 'number' && (data?.prev_after_id || 0) > 0;
-  const canNext = typeof data?.next_before_id === 'number' && (data?.next_before_id || 0) > 0;
-
-  async function loadDetail(eventID: number) {
-    if (detailByEventID[eventID]) return;
-    setDetailLoadingID(eventID);
-    try {
-      const res = await getAdminUsageEventDetail(eventID);
-      if (!res.success) throw new Error(res.message || '加载详情失败');
-      const detail = res.data;
-      if (detail) {
-        setDetailByEventID((prev) => ({ ...prev, [eventID]: detail }));
-      }
-    } catch (error) {
-      setErr(error instanceof Error ? error.message : '加载详情失败');
-    } finally {
-      setDetailLoadingID(null);
-    }
-  }
+  // Card still keys its detail lookup by event id; only `expandedID` is ever
+  // populated since only one row is fetched/expanded at a time.
+  const detailByEventID: Record<number, UsageEventDetail> =
+    expandedID !== null && detail.data ? { [expandedID]: detail.data } : {};
+  const detailLoadingID = expandedID !== null && detail.isFetching ? expandedID : null;
 
   function resetCursor() {
-    setBeforeID(undefined);
-    setAfterID(undefined);
+    setCursor({});
   }
 
   function handleDateRangeChange(range: { start: string; end: string }) {
     const isAll = !range.start.trim() && !range.end.trim();
-    setAllTime(isAll);
-    setStart(range.start);
-    setEnd(range.end);
+    setDraft((d) => ({ ...d, start: range.start, end: range.end, allTime: isAll }));
     resetCursor();
   }
 
   function handleUserChange(value: string) {
-    setFilterUser(value);
-    setFilterUserID(undefined);
+    setDraft((d) => ({ ...d, filterUser: value, filterUserID: undefined }));
     resetCursor();
   }
 
   function handleChannelChange(value: string) {
-    setFilterChannel(value);
-    setFilterChannelID(undefined);
+    setDraft((d) => ({ ...d, filterChannel: value, filterChannelID: undefined }));
     resetCursor();
   }
 
   function handleModelChange(value: string) {
-    setFilterModel(value);
-    setFilterModelExact(undefined);
+    setDraft((d) => ({ ...d, filterModel: value, filterModelExact: undefined }));
+    resetCursor();
+  }
+
+  function handleLimitChange(value: number) {
+    setDraft((d) => ({ ...d, limit: value }));
     resetCursor();
   }
 
   function handleRefresh() {
+    setApplied(draft);
     resetCursor();
-    void refresh();
   }
 
   function handleReset() {
-    setStart('');
-    setEnd('');
-    setAllTime(false);
+    const fresh = defaultFilters();
+    setDraft(fresh);
+    setApplied(fresh);
     advRef.current?.close();
-    setFilterUser('');
-    setFilterUserID(undefined);
-    setFilterChannel('');
-    setFilterModel('');
-    setFilterChannelID(undefined);
-    setFilterModelExact(undefined);
     resetCursor();
-    void refresh({
-      override: {
-        start: '',
-        end: '',
-        allTime: false,
-        filterUser: '',
-        filterUserID: undefined,
-        filterChannel: '',
-        filterChannelID: undefined,
-        filterModel: '',
-        filterModelExact: undefined,
-      },
-      cursor: {
-        beforeID: undefined,
-        afterID: undefined,
-      },
-    });
   }
 
   function handleToggleEvent(eventID: number) {
-    const next = expandedID === eventID ? null : eventID;
-    setExpandedID(next);
-    if (next) void loadDetail(eventID);
+    setExpandedID((prev) => (prev === eventID ? null : eventID));
   }
 
   function handlePrevPage() {
-    const nextAfterID = data?.prev_after_id;
+    const nextAfterID = page?.prev_after_id;
     if (!nextAfterID) return;
-    setBeforeID(undefined);
-    setAfterID(nextAfterID);
-    void refresh({
-      keepCursor: true,
-      cursor: { beforeID: undefined, afterID: nextAfterID },
-    });
+    setCursor({ afterID: nextAfterID });
   }
 
   function handleNextPage() {
-    const nextBeforeID = data?.next_before_id;
+    const nextBeforeID = page?.next_before_id;
     if (!nextBeforeID) return;
-    setAfterID(undefined);
-    setBeforeID(nextBeforeID);
-    void refresh({
-      keepCursor: true,
-      cursor: { beforeID: nextBeforeID, afterID: undefined },
-    });
+    setCursor({ beforeID: nextBeforeID });
   }
 
   return (
@@ -237,15 +149,15 @@ export function UsageAdminPage() {
 
           <UsageAdminFilterBar
             advRef={advRef}
-            start={start}
-            end={end}
+            start={draft.start}
+            end={draft.end}
             loading={loading}
-            limit={limit}
-            filterUser={filterUser}
-            filterChannel={filterChannel}
-            filterModel={filterModel}
+            limit={draft.limit}
+            filterUser={draft.filterUser}
+            filterChannel={draft.filterChannel}
+            filterModel={draft.filterModel}
             onDateRangeChange={handleDateRangeChange}
-            onLimitChange={setLimit}
+            onLimitChange={handleLimitChange}
             onUserChange={handleUserChange}
             onChannelChange={handleChannelChange}
             onModelChange={handleModelChange}
@@ -256,7 +168,7 @@ export function UsageAdminPage() {
 
         {loading ? (
           <div className="text-muted">加载中…</div>
-        ) : data && windowStats ? (
+        ) : summary.data && windowStats ? (
           <div className="row g-4">
             <div className="col-12">
               <UsageAdminSummaryCard windowStats={windowStats} />
@@ -268,7 +180,7 @@ export function UsageAdminPage() {
 
             <div className="col-12">
               <UsageAdminEventsCard
-                events={events}
+                events={eventList}
                 expandedID={expandedID}
                 detailByEventID={detailByEventID}
                 detailLoadingID={detailLoadingID}

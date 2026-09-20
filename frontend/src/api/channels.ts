@@ -11,23 +11,20 @@ export type Channel = {
   base_url?: string;
   api_key?: string;
   price_multiplier?: number;
+  config_json?: Record<string, unknown>;
 };
 
+// Money and latency arrive as decimal strings; token counts are protocol-shaped
+// and no longer aggregated by the core (ADR 0004).
 export type ChannelUsage = {
   usd: string;
-  tokens: number;
-  cache_ratio: string;
   avg_first_token_latency: string;
-  tokens_per_second: string;
 };
 
 type ChannelUsageOverview = {
   requests: number;
-  tokens: number;
   usd: string;
-  cache_ratio: string;
   avg_first_token_latency: string;
-  tokens_per_second: string;
 };
 
 export type ChannelRuntime = {
@@ -55,11 +52,8 @@ type ChannelsPageResponse = {
 
 export type ChannelTimeSeriesPoint = {
   bucket: string;
-  usd: number;
-  tokens: number;
-  cache_ratio: number;
-  avg_first_token_latency: number;
-  tokens_per_second: number;
+  usd: string;
+  avg_first_token_latency: string;
 };
 
 type ChannelTimeSeriesResponse = {
@@ -71,18 +65,21 @@ type ChannelTimeSeriesResponse = {
   points: ChannelTimeSeriesPoint[];
 };
 
-type CreateChannelRequest = {
+export type CreateChannelRequest = {
   type: string;
   name: string;
+  status?: boolean;
   groups?: string;
   base_url: string;
   key?: string;
   priority?: number;
   price_multiplier?: number;
+  config_json?: Record<string, unknown>;
 };
 
-type UpdateChannelRequest = {
+export type UpdateChannelRequest = {
   id: number;
+  type?: string;
   name?: string;
   groups?: string;
   base_url?: string;
@@ -90,6 +87,7 @@ type UpdateChannelRequest = {
   status?: boolean;
   priority?: number;
   price_multiplier?: number;
+  config_json?: Record<string, unknown>;
 };
 
 export async function getChannelsPage(params?: { start?: string; end?: string; all_time?: boolean }) {

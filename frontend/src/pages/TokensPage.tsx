@@ -1,30 +1,45 @@
 import { useEffect, useRef, useState } from 'react';
 
+import { type TokenChannelGroupOption, type UserToken } from '../api/tokens';
 import {
-  createUserToken,
-  deleteUserToken,
-  getUserTokenChannel,
-  listUserTokens,
-  revealUserToken,
-  revokeUserToken,
-  rotateUserToken,
-  setUserTokenChannel,
-  type TokenChannelGroupOption,
-  type UserToken,
-  type UserTokenChannelGroup,
-} from '../api/tokens';
-import { getUsageWindows, type UsageWindow } from '../api/usage';
+  useCreateToken,
+  useDeleteToken,
+  useFetchTokenChannel,
+  useRevealToken,
+  useRevokeToken,
+  useRotateToken,
+  useSetTokenChannel,
+  useTokenChannel,
+  useTokenUsageWindow,
+  useTokens,
+  type TokenUsageRange,
+} from '../data/tokens';
 import { BootstrapModal } from '../components/BootstrapModal';
+import { DividedStack } from '../components/DividedStack';
+import { SegmentedFrame } from '../components/SegmentedFrame';
 import { closeModalById } from '../components/modal';
 import { formatUSDPlain } from '../format/money';
-import { cacheHitRate, formatLocalDate, formatLocalDateTimeMinute } from './usage/usageUtils';
+import { formatLocalDate, formatLocalDateTimeMinute } from './usage/usageUtils';
+
+const emptyUsageRange: TokenUsageRange = { start: '', end: '' };
 
 export function TokensPage() {
-  const [tokens, setTokens] = useState<UserToken[]>([]);
-  const [tokensLoading, setTokensLoading] = useState(true);
-  const [tokensErr, setTokensErr] = useState('');
+  const tokensQuery = useTokens();
+  const tokens = tokensQuery.data ?? [];
+
+  const createTokenMutation = useCreateToken();
+  const rotateTokenMutation = useRotateToken();
+  const revokeTokenMutation = useRevokeToken();
+  const deleteTokenMutation = useDeleteToken();
+  const revealTokenMutation = useRevealToken();
+  const fetchTokenChannel = useFetchTokenChannel();
+  const setTokenChannelMutation = useSetTokenChannel();
+
+  // Action errors (reveal/copy/rotate/revoke/delete/create) share one banner with
+  // the list's load error, mirroring the single `tokensErr` field this page used
+  // to keep for both — whichever fired most recently is what the user sees.
+  const [actionErr, setActionErr] = useState('');
   const [revealed, setRevealed] = useState<Record<number, string>>({});
-  const [revealLoading, setRevealLoading] = useState<Record<number, boolean>>({});
   const [copiedID, setCopiedID] = useState<number | null>(null);
   const [groupNameByID, setGroupNameByID] = useState<Record<number, string>>({});
 
@@ -37,20 +52,20 @@ export function TokensPage() {
 
   const openTokenChannelModalBtnRef = useRef<HTMLButtonElement | null>(null);
   const [tokenChannelToken, setTokenChannelToken] = useState<UserToken | null>(null);
-  const [tokenChannelData, setTokenChannelData] = useState<UserTokenChannelGroup | null>(null);
   const [selectedGroupID, setSelectedGroupID] = useState(0);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [err, setErr] = useState('');
-  const [notice, setNotice] = useState('');
+  const [channelErr, setChannelErr] = useState('');
+  const [channelNotice, setChannelNotice] = useState('');
+  const channelQuery = useTokenChannel(tokenChannelToken?.id ?? null);
 
   const openTokenUsageModalBtnRef = useRef<HTMLButtonElement | null>(null);
   const [usageToken, setUsageToken] = useState<UserToken | null>(null);
-  const [usageWindow, setUsageWindow] = useState<UsageWindow | null>(null);
-  const [usageStart, setUsageStart] = useState('');
-  const [usageEnd, setUsageEnd] = useState('');
-  const [usageLoading, setUsageLoading] = useState(false);
-  const [usageErr, setUsageErr] = useState('');
+  // What is typed, and what has been submitted. The query is keyed on the
+  // latter, so editing a date does not fire a request until 查询 is pressed.
+  const [usageRange, setUsageRange] = useState<TokenUsageRange>(emptyUsageRange);
+  const [usageQueryRange, setUsageQueryRange] = useState<TokenUsageRange>(emptyUsageRange);
+  const usageQuery = useTokenUsageWindow(usageToken?.id ?? null, usageQueryRange);
+
+  const tokensErr = actionErr || (tokensQuery.error ? tokensQuery.error.message : '');
 
   useEffect(() => {
     if (copiedID == null) return;
@@ -75,45 +90,16 @@ export function TokensPage() {
     });
   }
 
+  // Whichever query resolves a token's allowed groups feeds the name lookup
+  // the main table uses, since the list endpoint itself only carries an id.
+  useEffect(() => {
+    if (channelQuery.data?.allowed_channel_groups) rememberGroupNames(channelQuery.data.allowed_channel_groups);
+  }, [channelQuery.data]);
+
   function formatTokenChannelGroup(t: UserToken): string {
     const id = t.channel_group_id || 0;
     if (id <= 0) return '-';
     return groupNameByID[id] || `渠道组 #${id}`;
-  }
-
-  async function refresh() {
-    setTokensErr('');
-    setTokensLoading(true);
-    try {
-      const res = await listUserTokens();
-      if (!res.success) {
-        throw new Error(res.message || '加载失败');
-      }
-      const nextTokens = res.data || [];
-      setTokens(nextTokens);
-      setRevealed((prev) => {
-        const active = new Set(nextTokens.filter((t) => t.status === 1).map((t) => t.id));
-        const next: Record<number, string> = {};
-        for (const [k, v] of Object.entries(prev)) {
-          const id = Number(k);
-          if (active.has(id)) next[id] = v;
-        }
-        return next;
-      });
-      setRevealLoading((prev) => {
-        const active = new Set(nextTokens.filter((t) => t.status === 1).map((t) => t.id));
-        const next: Record<number, boolean> = {};
-        for (const [k, v] of Object.entries(prev)) {
-          const id = Number(k);
-          if (active.has(id)) next[id] = v;
-        }
-        return next;
-      });
-    } catch (e) {
-      setTokensErr(e instanceof Error ? e.message : '加载失败');
-    } finally {
-      setTokensLoading(false);
-    }
   }
 
   function openGeneratedTokenModal(tok: string) {
@@ -154,349 +140,331 @@ export function TokensPage() {
 
   async function revealToken(tokenID: number): Promise<string> {
     if (revealed[tokenID]) return revealed[tokenID];
-    setRevealLoading((prev) => ({ ...prev, [tokenID]: true }));
-    try {
-      const res = await revealUserToken(tokenID);
-      if (!res.success) {
-        throw new Error(res.message || '查看失败');
-      }
-      const tok = (res.data?.token || '').toString();
-      if (tok.trim() === '') {
-        throw new Error('查看失败');
-      }
-      setRevealed((prev) => ({ ...prev, [tokenID]: tok }));
-      return tok;
-    } finally {
-      setRevealLoading((prev) => ({ ...prev, [tokenID]: false }));
-    }
+    const tok = await revealTokenMutation.mutateAsync(tokenID);
+    setRevealed((prev) => ({ ...prev, [tokenID]: tok }));
+    return tok;
   }
 
   async function saveTokenChannel() {
     const tokenID = tokenChannelToken?.id || 0;
     if (!tokenID) {
-      setErr('未选择 Token');
-      setNotice('');
+      setChannelErr('未选择 Token');
+      setChannelNotice('');
       return;
     }
     if (!selectedGroupID) {
-      setErr('请选择一个渠道组');
-      setNotice('');
+      setChannelErr('请选择一个渠道组');
+      setChannelNotice('');
       return;
     }
-    setErr('');
-    setNotice('');
-    setSaving(true);
+    setChannelErr('');
+    setChannelNotice('');
     try {
-      const res = await setUserTokenChannel(tokenID, selectedGroupID);
-      if (!res.success) throw new Error(res.message || '保存失败');
-      const refreshed = await getUserTokenChannel(tokenID);
-      if (refreshed.success) {
-        const d = refreshed.data || null;
-        setTokenChannelData(d);
-        setSelectedGroupID(d?.channel_group_id || 0);
-        if (d?.allowed_channel_groups) rememberGroupNames(d.allowed_channel_groups);
-      }
-      setTokens((prev) => prev.map((t) => (t.id === tokenID ? { ...t, channel_group_id: selectedGroupID } : t)));
-      setNotice('已保存');
+      await setTokenChannelMutation.mutateAsync({ tokenID, channelGroupID: selectedGroupID });
+      setChannelNotice('已保存');
     } catch (e) {
-      setErr(e instanceof Error ? e.message : '保存失败');
-    } finally {
-      setSaving(false);
+      setChannelErr(e instanceof Error ? e.message : '保存失败');
     }
   }
 
-  async function refreshUsage(tokenID: number, override?: { start?: string; end?: string }) {
-    setUsageErr('');
-    setUsageLoading(true);
-    try {
-      const startValue = (override?.start ?? usageStart).trim();
-      const endValue = (override?.end ?? usageEnd).trim();
-      const res = await getUsageWindows(startValue || undefined, endValue || undefined, tokenID);
-      if (!res.success) throw new Error(res.message || '加载失败');
-      const window0 = res.data?.windows?.[0] ?? null;
-      setUsageWindow(window0);
-
-      const day0 = window0 ? formatLocalDate(String(window0.since)) : '';
-      if (window0) {
-        if (!startValue && day0) setUsageStart(day0);
-        if (!endValue && (startValue || day0)) setUsageEnd(startValue || day0);
-      }
-    } catch (e) {
-      setUsageErr(e instanceof Error ? e.message : '加载失败');
-      setUsageWindow(null);
-    } finally {
-      setUsageLoading(false);
-    }
-  }
-
-  async function openTokenUsageModal(t: UserToken) {
-    setTokensErr('');
+  function openTokenUsageModal(t: UserToken) {
+    setActionErr('');
     setUsageToken(t);
-    setUsageWindow(null);
-    setUsageStart('');
-    setUsageEnd('');
-    setUsageErr('');
+    setUsageRange(emptyUsageRange);
+    setUsageQueryRange(emptyUsageRange);
     window.setTimeout(() => openTokenUsageModalBtnRef.current?.click(), 0);
-    void refreshUsage(t.id, { start: '', end: '' });
   }
 
-  async function openTokenChannelModal(t: UserToken) {
-    setTokensErr('');
-    setErr('');
-    setNotice('');
+  function openTokenChannelModal(t: UserToken) {
+    setActionErr('');
+    setChannelErr('');
+    setChannelNotice('');
     setTokenChannelToken(t);
-    setTokenChannelData(null);
     setSelectedGroupID(t.channel_group_id || 0);
-    setLoading(true);
-    setSaving(false);
-    try {
-      const res = await getUserTokenChannel(t.id);
-      if (!res.success) throw new Error(res.message || '加载失败');
-      const d = res.data || null;
-      setTokenChannelData(d);
-      setSelectedGroupID(d?.channel_group_id || 0);
-      if (d?.allowed_channel_groups) rememberGroupNames(d.allowed_channel_groups);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : '加载失败';
-      setErr(msg);
-      setTokenChannelData(null);
-    } finally {
-      setLoading(false);
-      window.setTimeout(() => openTokenChannelModalBtnRef.current?.click(), 0);
-    }
+    void (async () => {
+      try {
+        const data = await fetchTokenChannel(t.id);
+        setSelectedGroupID(data.channel_group_id || 0);
+      } catch (e) {
+        setChannelErr(e instanceof Error ? e.message : '加载失败');
+      } finally {
+        window.setTimeout(() => openTokenChannelModalBtnRef.current?.click(), 0);
+      }
+    })();
   }
 
-  useEffect(() => {
-    void refresh();
-  }, []);
-
-  const allowedGroups = (tokenChannelData?.allowed_channel_groups || [])
+  const allowedGroups = (channelQuery.data?.allowed_channel_groups || [])
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
   const selectedGroup = allowedGroups.find((g) => g.id === selectedGroupID) || null;
+  const usageWindow = usageQuery.data?.windows?.[0] ?? null;
+  const usageErr = usageQuery.error ? usageQuery.error.message : '';
+  // The server's chosen window, shown in the inputs whenever the user has not
+  // named one. Displayed, never written back into `usageRange`.
+  const usageEchoDay = usageWindow ? formatLocalDate(String(usageWindow.since)) : '';
+  const usageStartText = usageRange.start || usageEchoDay;
+  const usageEndText = usageRange.end || usageRange.start || usageEchoDay;
 
   return (
     <div className="fade-in-up">
-      <div className="rlm-page-head d-flex flex-wrap align-items-end justify-content-between gap-3">
-        <div>
-          <h1>API 令牌</h1>
-          <p className="rlm-page-sub">令牌默认隐藏，可在此页查看/复制；撤销后无法再查看。</p>
-        </div>
-        <button
-          type="button"
-          className="btn btn-primary btn-sm"
-          data-bs-toggle="modal"
-          data-bs-target="#createTokenModal"
-        >
-          <span className="me-1 material-symbols-rounded">add</span> 创建令牌
-        </button>
-      </div>
+      <SegmentedFrame>
+        <DividedStack>
+          <div className="card mb-0">
+            <div className="card-body d-flex flex-column flex-md-row justify-content-between align-items-center">
+              <div className="d-flex align-items-center mb-3 mb-md-0">
+                <div
+                  className="bg-primary bg-opacity-10 text-primary rounded-circle d-flex align-items-center justify-content-center me-3"
+                  style={{ width: 48, height: 48 }}
+                >
+                  <span className="fs-4 material-symbols-rounded">key</span>
+                </div>
+                <div>
+                  <h5 className="mb-1 fw-semibold">我的 API 令牌</h5>
+                  <p className="mb-0 text-muted small">
+                    为安全起见，令牌默认隐藏；可在此页查看/复制。令牌撤销后无法查看。
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                data-bs-toggle="modal"
+                data-bs-target="#createTokenModal"
+              >
+                <span className="me-1 material-symbols-rounded">add</span> 创建令牌
+              </button>
+            </div>
+          </div>
 
-      {tokensErr ? (
-        <div className="alert alert-danger" role="alert">
-          <span className="me-2 material-symbols-rounded">report</span>
-          {tokensErr}
-        </div>
-      ) : null}
+          {tokensErr ? (
+            <div className="alert alert-danger mb-0" role="alert">
+              <span className="me-2 material-symbols-rounded">report</span>
+              {tokensErr}
+            </div>
+          ) : null}
 
-      <div className="card mb-0 overflow-hidden">
-        <table className="table align-middle mb-0">
-          <thead>
-            <tr>
-              <th style={{ width: '18%' }}>名称</th>
-              <th style={{ width: '16%' }}>渠道组</th>
-              <th>密钥</th>
-              <th style={{ width: '10%' }}>状态</th>
-              <th className="text-end" style={{ width: '30%' }}>
-                操作
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {tokensLoading ? (
-              <tr>
-                <td colSpan={5} className="text-center py-5 text-muted">
-                  加载中…
-                </td>
-              </tr>
-            ) : tokens.length === 0 ? (
-              <tr>
-                <td colSpan={5} className="text-center py-5 text-muted">
-                  <div className="mb-2">
-                    <span className="fs-3 material-symbols-rounded">inbox</span>
-                  </div>
-                  暂无令牌，点击右上角按钮创建一个。
-                </td>
-              </tr>
-            ) : (
-              tokens.map((t) => (
-                <tr key={t.id}>
-                  <td>
-                    {t.name ? (
-                      <span className="fw-medium">{t.name}</span>
+          <div className="card h-100 overflow-hidden mb-0">
+            <div className="card-body p-0">
+              <div className="table-responsive">
+                <table className="table table-hover align-middle mb-0">
+                  <thead className="bg-light text-muted small text-uppercase">
+                    <tr>
+                      <th scope="col" className="fw-medium ps-4 py-3">
+                        名称
+                      </th>
+                      <th scope="col" className="fw-medium py-3">
+                        渠道组
+                      </th>
+                      <th scope="col" className="fw-medium py-3">
+                        预览
+                      </th>
+                      <th scope="col" className="fw-medium py-3">
+                        状态
+                      </th>
+                      <th scope="col" className="fw-medium text-end pe-4 py-3">
+                        操作
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="border-top-0">
+                    {tokensQuery.isFetching ? (
+                      <tr>
+                        <td colSpan={5} className="text-center py-5 text-muted">
+                          加载中…
+                        </td>
+                      </tr>
+                    ) : tokens.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="text-center py-5 text-muted">
+                          <div className="mb-2">
+                            <span className="fs-3 text-light-emphasis material-symbols-rounded">inbox</span>
+                          </div>
+                          暂无令牌，点击右上角按钮创建一个。
+                        </td>
+                      </tr>
                     ) : (
-                      <span className="text-muted small fst-italic">无备注</span>
-                    )}
-                  </td>
-                  <td>
-                    {t.channel_group_id ? (
-                      <span className="small">{formatTokenChannelGroup(t)}</span>
-                    ) : (
-                      <span className="text-muted small">-</span>
-                    )}
-                  </td>
-                  <td>
-                    {t.status !== 1 ? (
-                      <span className="text-muted small">-</span>
-                    ) : revealed[t.id] ? (
-                      <code className="rlm-key-code user-select-all">{revealed[t.id]}</code>
-                    ) : (
-                      <span className="rlm-key-mask">••••••••••••••••</span>
-                    )}
-                  </td>
-                  <td>
-                    {t.status === 1 ? (
-                      <span className="rlm-dot-state">活跃</span>
-                    ) : (
-                      <span className="rlm-dot-state off">已撤销</span>
-                    )}
-                  </td>
-                  <td className="text-end">
-                    {t.status === 1 ? (
-                      <>
-                        <button
-                          className="rlm-row-act mute"
-                          type="button"
-                          disabled={tokensLoading || revealLoading[t.id]}
-                          onClick={async () => {
-                            setTokensErr('');
-                            if (revealed[t.id]) {
-                              setRevealed((prev) => {
-                                const next = { ...prev };
-                                delete next[t.id];
-                                return next;
-                              });
-                              return;
-                            }
-                            try {
-                              await revealToken(t.id);
-                            } catch (e) {
-                              setTokensErr(e instanceof Error ? e.message : '查看失败');
-                            }
-                          }}
-                        >
-                          {revealed[t.id] ? '隐藏' : '查看'}
-                        </button>
-                        <button
-                          className="rlm-row-act mute"
-                          type="button"
-                          disabled={tokensLoading || revealLoading[t.id]}
-                          onClick={async () => {
-                            setTokensErr('');
-                            try {
-                              const tok = revealed[t.id] ? revealed[t.id] : await revealToken(t.id);
-                              await copyToken(tok, t.id);
-                            } catch (e) {
-                              setTokensErr(e instanceof Error ? e.message : '复制失败');
-                            }
-                          }}
-                        >
-                          {copiedID === t.id ? '已复制' : '复制'}
-                        </button>
-                        <button
-                          className="rlm-row-act"
-                          type="button"
-                          disabled={tokensLoading}
-                          onClick={() => void openTokenChannelModal(t)}
-                        >
-                          渠道组
-                        </button>
-                        <button
-                          className="rlm-row-act"
-                          type="button"
-                          disabled={tokensLoading}
-                          onClick={() => void openTokenUsageModal(t)}
-                        >
-                          用量
-                        </button>
-                      </>
-                    ) : null}
+                      tokens.map((t) => (
+                        <tr key={t.id}>
+                          <td className="ps-4 py-3">
+                            {t.name ? (
+                              <span className="fw-medium text-dark">{t.name}</span>
+                            ) : (
+                              <span className="text-muted small fst-italic">无备注</span>
+                            )}
+                          </td>
+                          <td className="py-3">
+                            {t.channel_group_id ? (
+                              <span className="small text-dark">{formatTokenChannelGroup(t)}</span>
+                            ) : (
+                              <span className="text-muted small">-</span>
+                            )}
+                          </td>
+                          <td className="py-3">
+                            {revealed[t.id] ? (
+                              <code className="bg-light px-2 py-1 rounded text-dark border user-select-all">
+                                {revealed[t.id]}
+                              </code>
+                            ) : (
+                              <span className="text-muted small">-</span>
+                            )}
+                          </td>
+                          <td className="py-3">
+                            {t.status === 1 ? (
+                              <span className="badge bg-success bg-opacity-10 text-success rounded-pill px-2">
+                                活跃
+                              </span>
+                            ) : (
+                              <span className="badge bg-secondary bg-opacity-10 text-secondary rounded-pill px-2">
+                                已撤销
+                              </span>
+                            )}
+                          </td>
+                          <td className="text-end pe-4 py-3">
+                            {t.status === 1 ? (
+                              <>
+                                <button
+                                  className="btn btn-link text-secondary p-0 text-decoration-none small"
+                                  type="button"
+                                  disabled={
+                                    tokensQuery.isFetching ||
+                                    (revealTokenMutation.isPending && revealTokenMutation.variables === t.id)
+                                  }
+                                  onClick={async () => {
+                                    setActionErr('');
+                                    if (revealed[t.id]) {
+                                      setRevealed((prev) => {
+                                        const next = { ...prev };
+                                        delete next[t.id];
+                                        return next;
+                                      });
+                                      return;
+                                    }
+                                    try {
+                                      await revealToken(t.id);
+                                    } catch (e) {
+                                      setActionErr(e instanceof Error ? e.message : '查看失败');
+                                    }
+                                  }}
+                                >
+                                  {revealed[t.id] ? '隐藏' : '查看'}
+                                </button>
 
-                    <button
-                      className="rlm-row-act"
-                      type="button"
-                      disabled={tokensLoading}
-                      onClick={async () => {
-                        setTokensErr('');
-                        setRevealed((prev) => {
-                          const next = { ...prev };
-                          delete next[t.id];
-                          return next;
-                        });
-                        try {
-                          const res = await rotateUserToken(t.id);
-                          if (!res.success) {
-                            throw new Error(res.message || '重新生成失败');
-                          }
-                          const tok = res.data?.token;
-                          await refresh();
-                          if (tok) openGeneratedTokenModal(tok);
-                        } catch (e) {
-                          setTokensErr(e instanceof Error ? e.message : '重新生成失败');
-                        }
-                      }}
-                    >
-                      重新生成
-                    </button>
+                                <span className="text-muted small mx-2">|</span>
 
-                    {t.status === 1 ? (
-                      <button
-                        className="rlm-row-act danger"
-                        type="button"
-                        disabled={tokensLoading}
-                        onClick={async () => {
-                          setTokensErr('');
-                          try {
-                            const res = await revokeUserToken(t.id);
-                            if (!res.success) {
-                              throw new Error(res.message || '撤销失败');
-                            }
-                            await refresh();
-                          } catch (e) {
-                            setTokensErr(e instanceof Error ? e.message : '撤销失败');
-                          }
-                        }}
-                      >
-                        撤销
-                      </button>
-                    ) : (
-                      <button
-                        className="rlm-row-act danger"
-                        type="button"
-                        disabled={tokensLoading}
-                        onClick={async () => {
-                          setTokensErr('');
-                          try {
-                            const res = await deleteUserToken(t.id);
-                            if (!res.success) {
-                              throw new Error(res.message || '删除失败');
-                            }
-                            await refresh();
-                          } catch (e) {
-                            setTokensErr(e instanceof Error ? e.message : '删除失败');
-                          }
-                        }}
-                      >
-                        删除
-                      </button>
+                                <button
+                                  className="btn btn-link text-secondary p-0 text-decoration-none small"
+                                  type="button"
+                                  disabled={
+                                    tokensQuery.isFetching ||
+                                    (revealTokenMutation.isPending && revealTokenMutation.variables === t.id)
+                                  }
+                                  onClick={async () => {
+                                    setActionErr('');
+                                    try {
+                                      const tok = revealed[t.id] ? revealed[t.id] : await revealToken(t.id);
+                                      await copyToken(tok, t.id);
+                                    } catch (e) {
+                                      setActionErr(e instanceof Error ? e.message : '复制失败');
+                                    }
+                                  }}
+                                >
+                                  {copiedID === t.id ? '已复制' : '复制'}
+                                </button>
+
+                                <span className="text-muted small mx-2">|</span>
+
+                                <button
+                                  className="btn btn-link text-secondary p-0 text-decoration-none small"
+                                  type="button"
+                                  disabled={tokensQuery.isFetching}
+                                  onClick={() => openTokenChannelModal(t)}
+                                >
+                                  渠道组
+                                </button>
+
+                                <span className="text-muted small mx-2">|</span>
+
+                                <button
+                                  className="btn btn-link text-secondary p-0 text-decoration-none small"
+                                  type="button"
+                                  disabled={tokensQuery.isFetching}
+                                  onClick={() => openTokenUsageModal(t)}
+                                >
+                                  用量
+                                </button>
+
+                                <span className="text-muted small mx-2">|</span>
+                              </>
+                            ) : null}
+
+                            <button
+                              className="btn btn-link text-primary p-0 text-decoration-none small"
+                              type="button"
+                              disabled={tokensQuery.isFetching}
+                              onClick={async () => {
+                                setActionErr('');
+                                setRevealed((prev) => {
+                                  const next = { ...prev };
+                                  delete next[t.id];
+                                  return next;
+                                });
+                                try {
+                                  const created = await rotateTokenMutation.mutateAsync(t.id);
+                                  if (created.token) openGeneratedTokenModal(created.token);
+                                } catch (e) {
+                                  setActionErr(e instanceof Error ? e.message : '重新生成失败');
+                                }
+                              }}
+                            >
+                              重新生成
+                            </button>
+
+                            <span className="text-muted small mx-2">|</span>
+
+                            {t.status === 1 ? (
+                              <button
+                                className="btn btn-link text-danger p-0 text-decoration-none small"
+                                type="button"
+                                disabled={tokensQuery.isFetching}
+                                onClick={async () => {
+                                  setActionErr('');
+                                  try {
+                                    await revokeTokenMutation.mutateAsync(t.id);
+                                  } catch (e) {
+                                    setActionErr(e instanceof Error ? e.message : '撤销失败');
+                                  }
+                                }}
+                              >
+                                撤销
+                              </button>
+                            ) : (
+                              <button
+                                className="btn btn-link text-danger p-0 text-decoration-none small"
+                                type="button"
+                                disabled={tokensQuery.isFetching}
+                                onClick={async () => {
+                                  setActionErr('');
+                                  try {
+                                    await deleteTokenMutation.mutateAsync(t.id);
+                                  } catch (e) {
+                                    setActionErr(e instanceof Error ? e.message : '删除失败');
+                                  }
+                                }}
+                              >
+                                删除
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))
                     )}
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </DividedStack>
+      </SegmentedFrame>
 
       {/* programmatically open the generated-token modal */}
       <button
@@ -531,11 +499,8 @@ export function TokensPage() {
         dialogClassName="modal-dialog-centered modal-lg"
         onHidden={() => {
           setUsageToken(null);
-          setUsageWindow(null);
-          setUsageStart('');
-          setUsageEnd('');
-          setUsageLoading(false);
-          setUsageErr('');
+          setUsageRange(emptyUsageRange);
+          setUsageQueryRange(emptyUsageRange);
         }}
       >
         {usageToken ? (
@@ -556,7 +521,7 @@ export function TokensPage() {
               className="row g-2 align-items-end mb-3"
               onSubmit={(e) => {
                 e.preventDefault();
-                void refreshUsage(usageToken.id);
+                setUsageQueryRange({ start: usageRange.start.trim(), end: usageRange.end.trim() });
               }}
             >
               <div className="col-auto">
@@ -564,9 +529,9 @@ export function TokensPage() {
                 <input
                   className="form-control form-control-sm"
                   type="date"
-                  value={usageStart}
-                  onChange={(e) => setUsageStart(e.target.value)}
-                  disabled={usageLoading}
+                  value={usageStartText}
+                  onChange={(e) => setUsageRange((prev) => ({ ...prev, start: e.target.value }))}
+                  disabled={usageQuery.isFetching}
                 />
               </div>
               <div className="col-auto">
@@ -574,23 +539,22 @@ export function TokensPage() {
                 <input
                   className="form-control form-control-sm"
                   type="date"
-                  value={usageEnd}
-                  onChange={(e) => setUsageEnd(e.target.value)}
-                  disabled={usageLoading}
+                  value={usageEndText}
+                  onChange={(e) => setUsageRange((prev) => ({ ...prev, end: e.target.value }))}
+                  disabled={usageQuery.isFetching}
                 />
               </div>
               <div className="col-auto d-flex gap-2">
-                <button className="btn btn-sm btn-primary" type="submit" disabled={usageLoading}>
+                <button className="btn btn-sm btn-primary" type="submit" disabled={usageQuery.isFetching}>
                   查询
                 </button>
                 <button
                   className="btn btn-sm btn-white border text-dark"
                   type="button"
-                  disabled={usageLoading}
+                  disabled={usageQuery.isFetching}
                   onClick={() => {
-                    setUsageStart('');
-                    setUsageEnd('');
-                    void refreshUsage(usageToken.id, { start: '', end: '' });
+                    setUsageRange(emptyUsageRange);
+                    setUsageQueryRange(emptyUsageRange);
                   }}
                 >
                   重置
@@ -598,7 +562,7 @@ export function TokensPage() {
               </div>
             </form>
 
-            {usageLoading ? <div className="text-muted">加载中…</div> : null}
+            {usageQuery.isFetching ? <div className="text-muted">加载中…</div> : null}
 
             {usageWindow ? (
               <div className="table-responsive">
@@ -620,25 +584,12 @@ export function TokensPage() {
                       <td className="text-end">{usageWindow.requests}</td>
                     </tr>
                     <tr>
-                      <td className="text-muted">Tokens</td>
-                      <td className="text-end">{usageWindow.tokens}</td>
+                      <td className="text-muted">平均首字延迟</td>
+                      <td className="text-end">{usageWindow.avg_first_token_latency}</td>
                     </tr>
                     <tr>
-                      <td className="text-muted">Tokens</td>
-                      <td className="text-end">
-                        {usageWindow.input_tokens}/{usageWindow.output_tokens}/
-                        {usageWindow.cache_read_tokens + usageWindow.cache_creation_tokens}
-                      </td>
-                    </tr>
-                    <tr>
-                      <td className="text-muted">缓存率</td>
-                      <td className="text-end">{cacheHitRate(usageWindow.cache_ratio)}</td>
-                    </tr>
-                    <tr>
-                      <td className="text-muted">RPM/TPM</td>
-                      <td className="text-end">
-                        {usageWindow.rpm}/{usageWindow.tpm}
-                      </td>
+                      <td className="text-muted">RPM</td>
+                      <td className="text-end">{usageWindow.rpm}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -686,10 +637,10 @@ export function TokensPage() {
               title="点击复制"
               disabled={generatedToken.trim() === ''}
               onClick={async () => {
-                setTokensErr('');
+                setActionErr('');
                 const ok = await copyText(generatedToken);
                 if (!ok) {
-                  setTokensErr('复制失败');
+                  setActionErr('复制失败');
                   return;
                 }
                 setGeneratedCopied(true);
@@ -722,35 +673,32 @@ export function TokensPage() {
         dialogClassName="modal-dialog-centered"
         onHidden={() => {
           setTokenChannelToken(null);
-          setTokenChannelData(null);
           setSelectedGroupID(0);
-          setErr('');
-          setNotice('');
-          setLoading(false);
-          setSaving(false);
+          setChannelErr('');
+          setChannelNotice('');
         }}
       >
         {!tokenChannelToken ? (
           <div className="text-muted">未选择 Token。</div>
         ) : (
           <div>
-            {err ? (
+            {channelErr ? (
               <div className="alert alert-danger d-flex align-items-center" role="alert">
                 <span className="me-2 material-symbols-rounded">warning</span>
-                <div>{err}</div>
+                <div>{channelErr}</div>
               </div>
             ) : null}
 
-            {notice ? (
+            {channelNotice ? (
               <div className="alert alert-success d-flex align-items-center" role="alert">
                 <span className="me-2 material-symbols-rounded">check_circle</span>
-                <div>{notice}</div>
+                <div>{channelNotice}</div>
               </div>
             ) : null}
 
             <p className="text-muted small mb-3">为该令牌指定一个渠道组。上游失败时会在组内按顺序切换渠道。</p>
 
-            {loading ? <div className="text-muted small mb-2">加载中…</div> : null}
+            {channelQuery.isFetching ? <div className="text-muted small mb-2">加载中…</div> : null}
 
             <div className="mb-3">
               <label className="form-label fw-medium text-dark">渠道组</label>
@@ -758,7 +706,7 @@ export function TokensPage() {
                 className="form-select"
                 value={selectedGroupID || ''}
                 onChange={(e) => setSelectedGroupID(Number(e.target.value) || 0)}
-                disabled={loading || saving}
+                disabled={channelQuery.isFetching || setTokenChannelMutation.isPending}
               >
                 <option value="">选择渠道组…</option>
                 {allowedGroups.map((g) => (
@@ -781,16 +729,21 @@ export function TokensPage() {
             </div>
 
             <div className="d-grid d-md-flex justify-content-md-end gap-2">
-              <button type="button" className="btn btn-light" data-bs-dismiss="modal" disabled={saving}>
+              <button
+                type="button"
+                className="btn btn-light"
+                data-bs-dismiss="modal"
+                disabled={setTokenChannelMutation.isPending}
+              >
                 关闭
               </button>
               <button
                 type="button"
                 className="btn btn-primary px-4"
-                disabled={saving || loading || !selectedGroupID}
+                disabled={setTokenChannelMutation.isPending || channelQuery.isFetching || !selectedGroupID}
                 onClick={() => void saveTokenChannel()}
               >
-                {saving ? '保存中…' : '保存'}
+                {setTokenChannelMutation.isPending ? '保存中…' : '保存'}
               </button>
             </div>
           </div>
@@ -813,19 +766,14 @@ export function TokensPage() {
         <form
           onSubmit={async (e) => {
             e.preventDefault();
-            setTokensErr('');
+            setActionErr('');
             try {
-              const res = await createUserToken(name.trim() || undefined);
-              if (!res.success) {
-                throw new Error(res.message || '创建失败');
-              }
-              const tok = res.data?.token || '';
-              pendingGeneratedTokenRef.current = tok.trim() === '' ? null : tok;
+              const created = await createTokenMutation.mutateAsync(name.trim() || undefined);
+              pendingGeneratedTokenRef.current = created.token.trim() === '' ? null : created.token;
               setName('');
               closeModalById('createTokenModal');
-              await refresh();
             } catch (e) {
-              setTokensErr(e instanceof Error ? e.message : '创建失败');
+              setActionErr(e instanceof Error ? e.message : '创建失败');
             }
           }}
         >
@@ -850,7 +798,7 @@ export function TokensPage() {
             <button type="button" className="btn btn-light text-muted" data-bs-dismiss="modal">
               取消
             </button>
-            <button type="submit" className="btn btn-primary px-4" disabled={tokensLoading}>
+            <button type="submit" className="btn btn-primary px-4" disabled={tokensQuery.isFetching}>
               创建
             </button>
           </div>

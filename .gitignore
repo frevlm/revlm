@@ -37,8 +37,8 @@ tmp-build-*/
 .env.bak.*
 config.yaml
 
-# Runtime data
-data/
+# Runtime data (the server's working directory, not source trees named data/)
+/data/
 
 # Backups
 backups/

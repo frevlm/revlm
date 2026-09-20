@@ -1,16 +1,26 @@
+import './runtime/vendor';
+import './index.css';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
-import './index.css';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { App } from './App.tsx';
 import { AuthProvider } from './auth/AuthContext.tsx';
+import { createQueryClient } from './data/queryClient.ts';
 
-createRoot(document.getElementById('root')!).render(
+const container = document.getElementById('root');
+if (!container) {
+  throw new Error('Root element #root not found');
+}
+
+createRoot(container).render(
   <StrictMode>
-    <BrowserRouter>
-      <AuthProvider>
-        <App />
-      </AuthProvider>
-    </BrowserRouter>
+    <QueryClientProvider client={createQueryClient()}>
+      <BrowserRouter>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </BrowserRouter>
+    </QueryClientProvider>
   </StrictMode>
 );

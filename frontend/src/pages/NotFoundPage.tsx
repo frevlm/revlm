@@ -1,6 +1,7 @@
 import { Link } from 'react-router-dom';
 
 import { SegmentedFrame } from '../components/SegmentedFrame';
+import { Button } from '../ui/Button';
 
 export function NotFoundPage() {
   return (
@@ -18,12 +19,12 @@ export function NotFoundPage() {
               <h2 className="h4 mb-2">404</h2>
               <p className="text-muted mb-4">页面不存在。</p>
               <div className="d-flex gap-2 justify-content-center flex-wrap">
-                <Link to="/dashboard" className="btn btn-primary btn-sm">
+                <Button component={Link} to="/dashboard" variant="solid" tone="primary" size="sm">
                   前往控制台
-                </Link>
-                <Link to="/login" className="btn btn-outline-secondary btn-sm">
+                </Button>
+                <Button component={Link} to="/login" variant="outline" size="sm">
                   前往登录
-                </Link>
+                </Button>
               </div>
             </div>
           </SegmentedFrame>

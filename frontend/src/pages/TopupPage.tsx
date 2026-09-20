@@ -1,32 +1,10 @@
-import { useCallback, useEffect, useState } from 'react';
-
-import { getBalance, type BillingBalanceResponse } from '../api/billing';
+import { useBalance } from '../data/billing';
 import { DividedStack } from '../components/DividedStack';
 import { SegmentedFrame } from '../components/SegmentedFrame';
 
 export function TopupPage() {
-  const [data, setData] = useState<BillingBalanceResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState('');
-
-  const refresh = useCallback(async () => {
-    setErr('');
-    setLoading(true);
-    try {
-      const res = await getBalance();
-      if (!res.success) throw new Error(res.message || '加载失败');
-      setData(res.data || null);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : '加载失败');
-      setData(null);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void refresh();
-  }, [refresh]);
+  const { data, isPending, error } = useBalance();
+  const err = error ? error.message : '';
 
   return (
     <div className="fade-in-up">
@@ -46,7 +24,7 @@ export function TopupPage() {
 
             <div className="card border-0 mb-0">
               <div className="card-body p-4">
-                <div className="display-6 fw-bold text-dark">{loading ? '…' : (data?.balance_usd ?? '-')}</div>
+                <div className="display-6 fw-bold text-dark">{isPending ? '…' : (data?.balance_usd ?? '-')}</div>
                 <div className="text-muted small mt-1">余额用于模型调用的按量计费扣费。如需充值请联系管理员。</div>
               </div>
             </div>

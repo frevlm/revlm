@@ -1,193 +1,138 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 
-import { listUserTokens, type UserToken } from '../api/tokens';
-import {
-  getUsageEventDetail,
-  getUsageEvents,
-  getUsageWindows,
-  type UsageEvent,
-  type UsageEventDetail,
-  type UsageWindow,
-} from '../api/usage';
+import { useAuth } from '../auth/AuthContext';
 import { DateRangePicker, SelectPicker } from '../components/DateRangePicker';
+import { SegmentedFrame } from '../components/SegmentedFrame';
 import {
   UsageAdvancedFiltersDropdown,
   type UsageAdvancedFiltersDropdownHandle,
 } from '../components/UsageAdvancedFiltersDropdown';
+import { useUsageEventDetail, useUsageEvents, useUsageWindow } from '../data/usage';
+import { useTokensByID } from '../data/tokens';
+import type { UsageEventDetail } from '../api/usage';
 import { UsageEventsCard } from './usage/UsageEventsCard';
 import { UsageSummaryCard } from './usage/UsageSummaryCard';
 import { formatLocalDate, formatLocalDateTimeMinute } from './usage/usageUtils';
 import { todayDateInputLocal } from '../utils/dateInput';
 
+type UsageFilters = {
+  start: string;
+  end: string;
+  allTime: boolean;
+  limit: number;
+  filterKey: string;
+  filterModel: string;
+};
+
+function defaultFilters(): UsageFilters {
+  const today = todayDateInputLocal();
+  return { start: today, end: today, allTime: false, limit: 50, filterKey: '', filterModel: '' };
+}
+
 export function UsagePage() {
-  const [data, setData] = useState<UsageWindow | null>(null);
-  const [events, setEvents] = useState<UsageEvent[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState('');
+  const { user } = useAuth();
 
-  const [tokenByID, setTokenByID] = useState<Record<number, UserToken>>({});
-
-  const [start, setStart] = useState(() => todayDateInputLocal());
-  const [end, setEnd] = useState(() => todayDateInputLocal());
-  const [allTime, setAllTime] = useState(false);
-  const [limit, setLimit] = useState(50);
-  const [filterKey, setFilterKey] = useState('');
-  const [filterModel, setFilterModel] = useState('');
+  // `draft` is what the controls display; `applied` is what actually drives the
+  // queries below. They start out equal (mirroring the mount-time fetch this page
+  // always used to do) and are only re-synced by 更新/重置/翻页 — every other control
+  // only edits `draft`, the same "changes stage until you click 更新" behavior the
+  // page had before the data layer existed.
+  const [draft, setDraft] = useState<UsageFilters>(defaultFilters);
+  const [applied, setApplied] = useState<UsageFilters>(defaultFilters);
   const advRef = useRef<UsageAdvancedFiltersDropdownHandle | null>(null);
 
-  const [nextBeforeID, setNextBeforeID] = useState<number | null>(null);
+  const [beforeID, setBeforeID] = useState<number | undefined>(undefined);
   const [beforeStack, setBeforeStack] = useState<number[]>([]);
-
   const [expandedID, setExpandedID] = useState<number | null>(null);
-  const [detailByEventID, setDetailByEventID] = useState<Record<number, UsageEventDetail>>({});
-  const [detailLoadingID, setDetailLoadingID] = useState<number | null>(null);
+
+  const allTimeActive = applied.allTime && !applied.start.trim() && !applied.end.trim();
+  const windowQuery = useUsageWindow(applied);
+  const eventsQuery = useUsageEvents({ ...applied, beforeID });
+  const tokensQuery = useTokensByID();
+  const detailQuery = useUsageEventDetail(expandedID);
+
+  const loading = windowQuery.isFetching || eventsQuery.isFetching;
+  const err = windowQuery.error?.message || eventsQuery.error?.message || '';
+  const events = eventsQuery.data?.events ?? [];
+  const tokenByID = tokensQuery.data ?? {};
 
   const canPrev = beforeStack.length > 0;
-  const canNext = useMemo(() => !!nextBeforeID && events.length === limit, [events.length, limit, nextBeforeID]);
+  const canNext = !!eventsQuery.data?.next_before_id && events.length === applied.limit;
 
-  async function refresh(
-    currentBeforeID?: number,
-    override?: { start?: string; end?: string; allTime?: boolean; filterKey?: string; filterModel?: string }
-  ) {
-    setErr('');
-    setLoading(true);
-    try {
-      const startValue = (override?.start ?? start).trim();
-      const endValue = (override?.end ?? end).trim();
-      const allTimeValue = !!(override?.allTime ?? allTime);
-      const allTimeActive = allTimeValue && !startValue && !endValue;
-      const indexParts: string[] = [];
-      const q_key = (override?.filterKey ?? filterKey).trim();
-      const q_model = (override?.filterModel ?? filterModel).trim();
-      if (q_key) indexParts.push('key');
-      if (q_model) indexParts.push('model');
-      const index = indexParts.length ? indexParts.join(',') : undefined;
-      const [w, e] = await Promise.all([
-        getUsageWindows(startValue || undefined, endValue || undefined, undefined, allTimeActive),
-        getUsageEvents({
-          limit,
-          before_id: currentBeforeID,
-          start: allTimeActive ? undefined : startValue || undefined,
-          end: allTimeActive ? undefined : endValue || undefined,
-          index,
-          q_key: q_key || undefined,
-          q_model: q_model || undefined,
-        }),
-      ]);
-      if (!w.success) throw new Error(w.message || '加载失败');
-      if (!e.success) throw new Error(e.message || '加载失败');
+  // Card still keys its detail lookup by event id; only `expandedID` is ever
+  // populated since only one row is fetched/expanded at a time.
+  const detailByEventID: Record<number, UsageEventDetail> =
+    expandedID !== null && detailQuery.data ? { [expandedID]: detailQuery.data } : {};
+  const detailLoadingID = expandedID !== null && detailQuery.isFetching ? expandedID : null;
+  // The fetch itself is automatic (see useUsageEventDetail above, keyed on
+  // expandedID) — this is a no-op kept only because UsageEventsCard's onClick
+  // calls it alongside setExpandedID.
+  const loadDetail = () => {};
 
-      const window0 = w.data?.windows?.[0] ?? null;
-      setData(window0);
-      setEvents(e.data?.events || []);
-      setNextBeforeID(e.data?.next_before_id ?? null);
+  // When the range is cleared by hand, the server picks a window and echoes it
+  // back. The picker displays that echo instead of it being written into
+  // `draft`/`applied`: writing it back would make the response an input to the
+  // query that produced it, refiring both queries under a new key.
+  const echoDay = !allTimeActive && windowQuery.data ? formatLocalDate(String(windowQuery.data.since)) : '';
+  const draftStartText = draft.start || echoDay;
+  const draftEndText = draft.end || draft.start || echoDay;
 
-      if (window0 && !allTimeActive) {
-        const day0 = formatLocalDate(String(window0.since));
-        if (!startValue && day0) setStart(day0);
-        if (!endValue && (startValue || day0)) setEnd(endValue || startValue || day0);
-      }
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : '加载失败');
-      setData(null);
-      setEvents([]);
-      setNextBeforeID(null);
-    } finally {
-      setLoading(false);
-    }
+  const rangeSinceText = windowQuery.data ? formatLocalDateTimeMinute(String(windowQuery.data.since)) : '';
+  const rangeUntilText = windowQuery.data ? formatLocalDateTimeMinute(String(windowQuery.data.until)) : '';
+
+  const selfEmail = (user?.email || user?.username || '').toString().trim() || '-';
+  const selfID = typeof user?.id === 'number' ? user.id : '-';
+
+  function resetCursor() {
+    setBeforeID(undefined);
+    setBeforeStack([]);
+    setExpandedID(null);
   }
-
-  async function loadDetail(eventID: number) {
-    if (detailByEventID[eventID]) return;
-    setDetailLoadingID(eventID);
-    try {
-      const res = await getUsageEventDetail(eventID);
-      if (!res.success) throw new Error(res.message || '加载详情失败');
-      const d = res.data;
-      if (d) {
-        setDetailByEventID((prev) => ({ ...prev, [eventID]: d }));
-      }
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : '加载详情失败');
-    } finally {
-      setDetailLoadingID(null);
-    }
-  }
-
-  useEffect(() => {
-    void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const res = await listUserTokens();
-        if (!res.success) return;
-        const list = res.data || [];
-        const m: Record<number, UserToken> = {};
-        for (const tok of list) {
-          m[tok.id] = tok;
-        }
-        if (cancelled) return;
-        setTokenByID(m);
-      } catch {
-        // ignore
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  const rangeSinceText = data ? formatLocalDateTimeMinute(String(data.since)) : '';
-  const rangeUntilText = data ? formatLocalDateTimeMinute(String(data.until)) : '';
 
   const onPrevPage = () => {
     const nextStack = beforeStack.slice(0, -1);
     setBeforeStack(nextStack);
     setExpandedID(null);
-    const nextBefore = nextStack.length > 0 ? nextStack[nextStack.length - 1] : undefined;
-    void refresh(nextBefore);
+    setBeforeID(nextStack.length > 0 ? nextStack[nextStack.length - 1] : undefined);
   };
 
   const onNextPage = () => {
-    if (!nextBeforeID) return;
-    setBeforeStack((s) => [...s, nextBeforeID]);
+    const next = eventsQuery.data?.next_before_id;
+    if (!next) return;
+    setBeforeStack((s) => [...s, next]);
     setExpandedID(null);
-    void refresh(nextBeforeID);
+    setBeforeID(next);
   };
 
   return (
     <div className="fade-in-up">
-      <div className="rlm-segmented">
-        <div className="rlm-page-head mb-0">
-          <h1>用量统计</h1>
-          <p className="rlm-page-sub">按日期范围汇总用量，点击行展开事件明细。</p>
-        </div>
-
-        {err ? (
-          <div className="alert alert-danger mb-0">
-            <span className="me-2 material-symbols-rounded">warning</span>
-            {err}
-          </div>
-        ) : null}
-
+      <SegmentedFrame>
         <div>
-          <div className="card mb-0">
+          <div className="d-flex justify-content-between align-items-center mb-3">
+            <div>
+              <h3 className="mb-1 fw-bold">用量统计</h3>
+              <div className="text-muted small">按日期范围汇总用量，并支持事件明细查看。</div>
+            </div>
+          </div>
+
+          {err ? (
+            <div className="alert alert-danger mb-3">
+              <span className="me-2 material-symbols-rounded">warning</span>
+              {err}
+            </div>
+          ) : null}
+
+          <div className="card border-0 shadow-sm mb-0">
             <div className="card-body py-3 px-4">
               <div className="d-flex flex-wrap align-items-end gap-3">
                 <div className="d-flex flex-wrap align-items-center gap-2">
                   <div className="text-muted smaller fw-medium text-nowrap">时间区间</div>
                   <DateRangePicker
-                    start={start}
-                    end={end}
+                    start={draftStartText}
+                    end={draftEndText}
                     onChange={(r) => {
                       const isAll = !r.start.trim() && !r.end.trim();
-                      setAllTime(isAll);
-                      setStart(r.start);
-                      setEnd(r.end);
+                      setDraft((d) => ({ ...d, start: r.start, end: r.end, allTime: isAll }));
                       setBeforeStack([]);
                       setExpandedID(null);
                     }}
@@ -198,7 +143,7 @@ export function UsagePage() {
                 <div className="d-flex flex-wrap align-items-center gap-2">
                   <div className="text-muted smaller fw-medium text-nowrap">显示条数</div>
                   <SelectPicker
-                    value={limit}
+                    value={draft.limit}
                     options={[
                       { label: '20', value: 20 },
                       { label: '50', value: 50 },
@@ -206,7 +151,7 @@ export function UsagePage() {
                     ]}
                     label="条"
                     onChange={(val) => {
-                      setLimit(val);
+                      setDraft((d) => ({ ...d, limit: val }));
                       setBeforeStack([]);
                       setExpandedID(null);
                     }}
@@ -224,9 +169,9 @@ export function UsagePage() {
                         label: 'Key',
                         title: 'Key 名称',
                         placeholder: '输入 Key 名称',
-                        value: filterKey,
+                        value: draft.filterKey,
                         onChange: (v) => {
-                          setFilterKey(v);
+                          setDraft((d) => ({ ...d, filterKey: v }));
                           setBeforeStack([]);
                           setExpandedID(null);
                         },
@@ -236,9 +181,9 @@ export function UsagePage() {
                         label: '模型',
                         title: '模型',
                         placeholder: '输入模型名',
-                        value: filterModel,
+                        value: draft.filterModel,
                         onChange: (v) => {
-                          setFilterModel(v);
+                          setDraft((d) => ({ ...d, filterModel: v }));
                           setBeforeStack([]);
                           setExpandedID(null);
                         },
@@ -253,9 +198,8 @@ export function UsagePage() {
                     type="button"
                     disabled={loading}
                     onClick={() => {
-                      setBeforeStack([]);
-                      setExpandedID(null);
-                      void refresh(undefined);
+                      setApplied(draft);
+                      resetCursor();
                     }}
                   >
                     <span className="material-symbols-rounded me-1">refresh</span>
@@ -266,22 +210,11 @@ export function UsagePage() {
                     type="button"
                     disabled={loading}
                     onClick={() => {
-                      const today = todayDateInputLocal();
-                      setAllTime(false);
-                      setStart(today);
-                      setEnd(today);
+                      const fresh = defaultFilters();
+                      setDraft(fresh);
+                      setApplied(fresh);
                       advRef.current?.close();
-                      setFilterKey('');
-                      setFilterModel('');
-                      setBeforeStack([]);
-                      setExpandedID(null);
-                      void refresh(undefined, {
-                        start: today,
-                        end: today,
-                        allTime: false,
-                        filterKey: '',
-                        filterModel: '',
-                      });
+                      resetCursor();
                     }}
                   >
                     重置
@@ -294,26 +227,37 @@ export function UsagePage() {
 
         {loading ? (
           <div className="text-muted">加载中…</div>
-        ) : data ? (
-          <>
-            <UsageSummaryCard data={data} rangeSinceText={rangeSinceText} rangeUntilText={rangeUntilText} />
-            <UsageEventsCard
-              events={events}
-              tokenByID={tokenByID}
-              expandedID={expandedID}
-              setExpandedID={setExpandedID}
-              loadDetail={loadDetail}
-              detailLoadingID={detailLoadingID}
-              detailByEventID={detailByEventID}
-              canPrev={canPrev}
-              canNext={canNext}
-              loading={loading}
-              onPrevPage={onPrevPage}
-              onNextPage={onNextPage}
-            />
-          </>
+        ) : windowQuery.data ? (
+          <div className="row g-4">
+            <div className="col-12">
+              <UsageSummaryCard
+                data={windowQuery.data}
+                rangeSinceText={rangeSinceText}
+                rangeUntilText={rangeUntilText}
+              />
+            </div>
+
+            <div className="col-12">
+              <UsageEventsCard
+                events={events}
+                tokenByID={tokenByID}
+                expandedID={expandedID}
+                setExpandedID={setExpandedID}
+                loadDetail={loadDetail}
+                detailLoadingID={detailLoadingID}
+                detailByEventID={detailByEventID}
+                canPrev={canPrev}
+                canNext={canNext}
+                loading={loading}
+                onPrevPage={onPrevPage}
+                onNextPage={onNextPage}
+                selfEmail={selfEmail}
+                selfID={selfID}
+              />
+            </div>
+          </div>
         ) : null}
-      </div>
+      </SegmentedFrame>
     </div>
   );
 }

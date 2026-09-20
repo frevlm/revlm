@@ -27,7 +27,7 @@ export async function createAdminUser(req: CreateAdminUserRequest) {
   return res.data;
 }
 
-type UpdateAdminUserRequest = {
+export type UpdateAdminUserRequest = {
   email?: string;
   status?: number;
   role?: string;

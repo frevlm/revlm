@@ -2,7 +2,6 @@ import type { UsageWindow } from '../../api/usage';
 import { formatSecondsFromMilliseconds } from '../../format/duration';
 import { formatIntComma } from '../../format/int';
 import { formatUSDPlain } from '../../format/money';
-import { cacheHitRate } from './usageUtils';
 
 export function UsageSummaryCard({
   data,
@@ -13,63 +12,50 @@ export function UsageSummaryCard({
   rangeSinceText: string;
   rangeUntilText: string;
 }) {
+  // Requests, spend and latency only: token counts belong to whichever protocol
+  // served the request and now live inside usage_details, which the core does not
+  // parse or aggregate.
   const rpm = formatIntComma(data.rpm ?? 0);
-  const tpm = formatIntComma(data.tpm ?? 0);
-  const cachedTotal = data.cache_read_tokens + data.cache_creation_tokens;
-  const tokensPerSecond = data.tokens_per_second > 0 ? data.tokens_per_second.toFixed(2) : '-';
+  const firstTokenSamples = formatIntComma(data.first_token_samples ?? 0);
 
   return (
-    <div className="card mb-0">
-      <div className="card-header d-flex flex-wrap align-items-center justify-content-between gap-2">
-        <span>统计区间</span>
-        <span className="text-muted smaller fw-normal font-monospace">
-          {rangeSinceText} ~ {rangeUntilText}
-        </span>
-      </div>
-      <div className="card-body">
-        <div className="rlm-stats">
-          <div className="rlm-stat rlm-stat-green">
-            <div className="rlm-stat-label">消耗</div>
-            <div className="rlm-stat-value">$ {formatUSDPlain(data.usd)}</div>
-            <div className="rlm-stat-delta">USD · 含缓存计费</div>
-          </div>
-          <div className="rlm-stat rlm-stat-blue">
-            <div className="rlm-stat-label">请求数</div>
-            <div className="rlm-stat-value">{formatIntComma(data.requests)}</div>
-            <div className="rlm-stat-delta">RPM {rpm} 次/分钟</div>
-          </div>
-          <div className="rlm-stat rlm-stat-clay">
-            <div className="rlm-stat-label">Token 吞吐</div>
-            <div className="rlm-stat-value">{formatIntComma(data.tokens)}</div>
-            <div className="rlm-stat-delta">TPM {tpm} Tokens/分钟</div>
-          </div>
-          <div className="rlm-stat rlm-stat-violet">
-            <div className="rlm-stat-label">缓存率</div>
-            <div className="rlm-stat-value">{cacheHitRate(data.cache_ratio)}</div>
-            <div className="rlm-stat-delta">缓存 Token {formatIntComma(cachedTotal)}</div>
-          </div>
+    <div className="card border-0 overflow-hidden">
+      <div className="bg-primary bg-opacity-10 py-3 px-4 d-flex justify-content-between align-items-center">
+        <div>
+          <span className="text-primary fw-bold text-uppercase small">统计区间</span>
+          <span className="text-primary text-opacity-75 smaller ms-2">
+            统计区间: {rangeSinceText} ~ {rangeUntilText}
+          </span>
         </div>
-
-        <div className="rlm-substats">
-          <div className="rlm-substat">
-            <div className="rlm-substat-label">输入总计</div>
-            <div className="rlm-substat-value">{formatIntComma(data.input_tokens)}</div>
+        <div className="text-primary text-opacity-75 smaller">
+          <i className="ri-shield-check-line me-1"></i> 实时统计
+        </div>
+      </div>
+      <div className="card-body p-4">
+        <div className="row g-4">
+          <div className="col-lg-4 border-end">
+            <div className="mb-4">
+              <div className="text-muted smaller mb-1">消耗（USD）</div>
+              <h1 className="display-6 fw-bold mb-0 text-dark">{formatUSDPlain(data.usd)}</h1>
+            </div>
           </div>
-          <div className="rlm-substat">
-            <div className="rlm-substat-label">输出总计</div>
-            <div className="rlm-substat-value">{formatIntComma(data.output_tokens)}</div>
-          </div>
-          <div className="rlm-substat">
-            <div className="rlm-substat-label">缓存 Token</div>
-            <div className="rlm-substat-value">{formatIntComma(cachedTotal)}</div>
-          </div>
-          <div className="rlm-substat">
-            <div className="rlm-substat-label">平均首字延迟</div>
-            <div className="rlm-substat-value">{formatSecondsFromMilliseconds(data.avg_first_token_latency)}</div>
-          </div>
-          <div className="rlm-substat">
-            <div className="rlm-substat-label">平均 Tokens/s</div>
-            <div className="rlm-substat-value">{tokensPerSecond}</div>
+          <div className="col-lg-8 ps-lg-4">
+            <div className="row g-3">
+              <div className="col-sm-6 col-md-3">
+                <div className="metric-card p-3 rounded-3 border">
+                  <div className="text-muted smaller mb-1">全局请求数</div>
+                  <div className="h4 fw-bold mb-1">{formatIntComma(data.requests)}</div>
+                  <div className="text-primary smaller fw-medium">{rpm} RPM</div>
+                </div>
+              </div>
+              <div className="col-sm-6 col-md-3">
+                <div className="metric-card p-3 rounded-3 border">
+                  <div className="text-muted smaller mb-1">平均首字延迟</div>
+                  <div className="h4 fw-bold mb-1">{formatSecondsFromMilliseconds(data.avg_first_token_latency)}</div>
+                  <div className="text-muted smaller fw-medium">基于 {firstTokenSamples} 个有效首字样本</div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
