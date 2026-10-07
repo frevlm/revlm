@@ -10,7 +10,6 @@ target_include_directories(revlm_core PUBLIC
 target_link_libraries(revlm_core PUBLIC
   Boost::json
   Boost::url
-  Boost::random
   revlm::http
   revlm::odb
   date::date-tz
